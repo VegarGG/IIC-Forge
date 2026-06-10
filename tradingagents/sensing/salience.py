@@ -159,16 +159,26 @@ class SalienceScorer:
         # asyncio.to_thread propagates exceptions normally, so the
         # deferred-sentinel path in score() keeps working unchanged.
         #
-        # Await-detection (preserved from original): if the callable is async
-        # (returns a coroutine / Awaitable), skip to_thread and await directly.
-        # We detect this *without* an extra call by checking iscoroutinefunction
-        # first; for non-coroutine callables we run via to_thread.
+        # Belt-and-braces await-detection (restored): first check whether the
+        # callable itself is a coroutine function (async def / async __call__) and
+        # if so await it directly.  For everything else run via to_thread, then
+        # check whether the returned value is itself awaitable — a sync function
+        # that returns a coroutine object (e.g. a factory wrapping an async inner)
+        # must be awaited or the coroutine is never executed and _parse receives a
+        # coroutine object instead of a str, silently producing source='deferred'.
         import inspect
         if inspect.iscoroutinefunction(self._llm):
-            # Async callable: await the coroutine directly.
+            # Async callable (async def function or object with async __call__):
+            # await the coroutine directly on the event loop.
             return await self._llm(prompt)
         # Sync callable: dispatch to a worker thread so the event loop stays live.
-        return await asyncio.to_thread(self._llm, prompt)
+        out = await asyncio.to_thread(self._llm, prompt)
+        # Belt-and-braces: if the sync callable returned an awaitable (e.g. a
+        # coroutine object from an async inner function), await it now so the
+        # result is always a plain str before being handed to _parse.
+        if hasattr(out, "__await__"):
+            out = await out
+        return out
 
     async def score(
         self,

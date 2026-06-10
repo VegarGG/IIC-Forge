@@ -1,8 +1,8 @@
 """Tests that the triage consume loop is non-blocking (LLM/embed off the event loop).
 
 Design:
-- Use a thread-identity assertion: inside the fake call_llm (and the embedder's
-  embed()), assert that the call does NOT run on the event-loop thread.
+- Use a thread-identity assertion: inside the fake call_llm AND the embedder's
+  embed(), assert that the call does NOT run on the event-loop thread.
 - Use a heartbeat counter to smoke-check concurrency: a task increments a counter
   every 10 ms; while a call_llm that sleeps 0.3 s processes one event, the heartbeat
   must still advance (counter >= 1 after the event completes).
@@ -201,3 +201,150 @@ async def test_cache_hit_does_not_invoke_llm():
     assert call_count["n"] == 1, (
         f"LLM was called {call_count['n']} times; expected 1 (cache should prevent 2nd call)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 5: Embedder (stage-2 dedupe) runs OFF the event-loop thread
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+async def test_embedder_runs_off_event_loop_thread(conn, tmp_path):
+    """Assert that embedder.embed() inside DedupeStage2.check and .record
+    is dispatched to a worker thread, not run on the event-loop thread.
+
+    We route an envelope that misses stage-1 (no prior fingerprint) so the
+    pipeline must proceed to stage-2, which calls embed().
+
+    The test captures the thread identity of each embed() call and then
+    asserts AFTER process_one returns (so the assertion is never swallowed by
+    the consume-loop exception handler).
+    """
+    import fakeredis.aioredis
+    from tradingagents.sensing.triage import Triage
+
+    loop_thread = threading.current_thread()
+    embed_threads: list[threading.Thread] = []
+
+    class ThreadCheckEmbedder:
+        def embed(self, text: str):
+            embed_threads.append(threading.current_thread())
+            # Return a minimal valid 384-dim zero vector.
+            return [0.0] * 384
+
+    def simple_llm(prompt: str) -> str:
+        return json.dumps({
+            "salience": 0.5,
+            "matched_tickers": [],
+            "mentioned_tickers": [],
+            "reason": "test",
+        })
+
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+    # Use a unique text so stage-1 fingerprint misses and stage-2 runs.
+    env = _env(text="Unique embedder thread check event xyzzy-42")
+
+    t = Triage(
+        conn=conn, redis=r,
+        embedder=ThreadCheckEmbedder(),
+        llm_call=simple_llm,
+        data_dir=str(tmp_path / "data"),
+    )
+
+    # Call process_one directly so exceptions propagate (not swallowed by
+    # the consume-loop _process_entry try/except).
+    await t.process_one(env)
+
+    assert embed_threads, (
+        "embedder.embed() was never called — check that stage-2 dedupe ran"
+    )
+    for i, t_thread in enumerate(embed_threads):
+        assert t_thread is not loop_thread, (
+            f"embedder.embed() call #{i} ran on the event-loop (MainThread) — "
+            "it must be dispatched off-thread via asyncio.to_thread or an executor"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests 6-7: _invoke_llm await-detection — sync callable returning a coroutine
+# and object with async __call__
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+async def test_sync_callable_returning_coroutine_succeeds():
+    """A sync function that returns a coroutine object should still be awaited.
+
+    This catches the regression where iscoroutinefunction() returns False for
+    a plain function that returns a coroutine, so the coroutine is passed to
+    to_thread un-awaited and the parse step sees a coroutine object instead of
+    a str → score source becomes 'deferred' instead of 'llm'.
+    """
+    import warnings
+    from tradingagents.sensing.salience import SalienceScorer
+
+    _RESPONSE = json.dumps({
+        "salience": 0.6,
+        "matched_tickers": [],
+        "mentioned_tickers": [],
+        "reason": "awaitable-test",
+    })
+
+    async def _inner(prompt: str) -> str:
+        return _RESPONSE
+
+    def sync_returns_coroutine(prompt: str):
+        # Returns a coroutine object (not a coroutine function itself).
+        return _inner(prompt)
+
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    scorer = SalienceScorer(redis=r, llm_call=sync_returns_coroutine,
+                            cache_ttl_seconds=86400)
+
+    env = _env(text="Sync-returns-coroutine test event")
+    # Treat unawaited-coroutine RuntimeWarning as an error to ensure none fires.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = await scorer.score(env=env, watchlist=[], macro_context="")
+
+    assert result.source == "llm", (
+        f"Expected source='llm' but got source='{result.source}' (reason={result.reason!r}). "
+        "A sync callable returning a coroutine must be awaited after to_thread returns it."
+    )
+    assert abs(result.salience - 0.6) < 1e-9
+
+
+@pytest.mark.unit
+async def test_async_callable_object_succeeds():
+    """An object with async __call__ should be awaited directly, not run in to_thread.
+
+    inspect.iscoroutinefunction() returns True for instances whose __call__ is
+    defined with 'async def', so this tests the async branch of _invoke_llm.
+    """
+    import warnings
+    from tradingagents.sensing.salience import SalienceScorer
+
+    _RESPONSE = json.dumps({
+        "salience": 0.8,
+        "matched_tickers": [],
+        "mentioned_tickers": [],
+        "reason": "async-obj-test",
+    })
+
+    class AsyncCallableLLM:
+        async def __call__(self, prompt: str) -> str:
+            return _RESPONSE
+
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    scorer = SalienceScorer(redis=r, llm_call=AsyncCallableLLM(),
+                            cache_ttl_seconds=86400)
+
+    env = _env(text="Async-callable-object test event")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = await scorer.score(env=env, watchlist=[], macro_context="")
+
+    assert result.source == "llm", (
+        f"Expected source='llm' but got source='{result.source}' (reason={result.reason!r}). "
+        "An object with async __call__ must be invoked via await, not to_thread."
+    )
+    assert abs(result.salience - 0.8) < 1e-9

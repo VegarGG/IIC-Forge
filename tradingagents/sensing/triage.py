@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,29 @@ class TriageResult:
     salience: Optional[float] = None
     deduped_of: Optional[str] = None
     matched_tickers: Sequence[str] = ()
+
+
+def _open_ds2_conn(db_path: str) -> sqlite3.Connection:
+    """Open a sqlite connection for DedupeStage2's dedicated executor thread.
+
+    check_same_thread=False is required because the connection is created on
+    the Triage constructor thread (the asyncio event-loop thread) but then used
+    exclusively inside a single-thread ThreadPoolExecutor worker.  We document
+    this explicitly: the executor has max_workers=1, so only one thread ever
+    touches this connection at a time — the usual sqlite thread-safety concern
+    (concurrent writes from multiple threads) cannot arise.  The standard
+    connect() helper is intentionally not used here to avoid changing its
+    global signature; we load sqlite_vec ourselves so KNN queries work.
+    """
+    import sqlite_vec as _sqlite_vec
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    ds2_conn = sqlite3.connect(db_path, check_same_thread=False)
+    ds2_conn.row_factory = sqlite3.Row
+    ds2_conn.execute("PRAGMA busy_timeout=5000")
+    ds2_conn.enable_load_extension(True)
+    _sqlite_vec.load(ds2_conn)
+    ds2_conn.enable_load_extension(False)
+    return ds2_conn
 
 
 class Triage:
@@ -70,9 +94,27 @@ class Triage:
         self._data_dir = data_dir
         self._ds1 = DedupeStage1(conn=conn, redis=redis,
                                   fingerprint_ttl_hours=fingerprint_ttl_hours)
-        self._ds2 = DedupeStage2(conn=conn, embedder=embedder,
+
+        # DedupeStage2 calls embedder.embed() — a CPU-bound sentence-transformer
+        # encode that takes 10-100+ ms and must not block the event loop.  We
+        # dispatch all ds2 calls through a single-thread executor so that:
+        #   (a) embed() runs off the event-loop thread, and
+        #   (b) sqlite access is serialized (one thread owns the connection).
+        # A dedicated connection opened with check_same_thread=False is needed
+        # because the connection is created here (on the event-loop thread) but
+        # used inside the executor worker thread.  max_workers=1 means only one
+        # thread ever touches _ds2_conn, satisfying sqlite's thread-safety
+        # requirement without requiring a lock.
+        db_path = conn.execute(
+            "PRAGMA database_list"
+        ).fetchone()[2]  # (seq, name, file) → file is index 2
+        self._ds2_conn = _open_ds2_conn(db_path)
+        self._ds2_executor = ThreadPoolExecutor(max_workers=1,
+                                                thread_name_prefix="triage-ds2")
+        self._ds2 = DedupeStage2(conn=self._ds2_conn, embedder=embedder,
                                   cosine_threshold=cosine_threshold,
                                   window_hours=window_hours)
+
         self._scorer = SalienceScorer(redis=redis, llm_call=llm_call,
                                        cache_ttl_seconds=salience_cache_ttl_seconds)
         self._validator = TickerValidator(conn=conn)
@@ -116,8 +158,12 @@ class Triage:
             return TriageResult(event_id=ev_id, status="duplicate",
                                 deduped_of=hit1)
 
-        # Stage 2: embedding cosine.
-        hit2 = self._ds2.check(env.text)
+        # Stage 2: embedding cosine.  Dispatched to the single-thread executor
+        # so that embedder.embed() (CPU-bound encode) runs off the event loop.
+        loop = asyncio.get_running_loop()
+        hit2 = await loop.run_in_executor(
+            self._ds2_executor, self._ds2.check, env.text
+        )
         if hit2:
             ev_id = self._new_event_id()
             insert_event(
@@ -149,7 +195,12 @@ class Triage:
         )
         # Record fingerprints + embedding (only on non-duplicates).
         await self._ds1.record(env, event_id=ev_id)
-        self._ds2.record(text=env.text, event_id=ev_id)
+        # ds2.record embeds the text (CPU-bound) — also off-thread via the
+        # same single-thread executor so sqlite access stays serialized.
+        await loop.run_in_executor(
+            self._ds2_executor,
+            lambda: self._ds2.record(text=env.text, event_id=ev_id),
+        )
 
         # Per-ticker rows + watchlist gate.
         conf_by_ticker = {m.ticker: m.confidence for m in score.mentioned_tickers}
