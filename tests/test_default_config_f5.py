@@ -36,9 +36,9 @@ def test_default_config_has_f5_keys(monkeypatch):
     assert C["morning_digest"]["schedule_local_time"] == "07:00"
     assert C["morning_digest"]["watchlist_source"] == "db"
 
-    # Refinement
+    # Refinement (classifier_llm removed — IIC-FORGE-05 Task 4, subsumed by llm_roles)
     assert C["refinement"]["max_depth"] == 3
-    assert C["refinement"]["classifier_llm"] == "quick_think_llm"
+    assert "classifier_llm" not in C["refinement"]
     assert C["refinement"]["action_expires_hours"] == 24
 
     # Action handler
