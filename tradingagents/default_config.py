@@ -83,9 +83,9 @@ def _apply_nested_env_overrides(config: dict) -> dict:
     # cannot reach nested keys, so the merge is done here.
     _role_env_map = [
         ("IIC_TRIAGE_LLM_PROVIDER",    "triage_salience", "provider"),
-        ("IIC_TRIAGE_LLM_MODEL",        "triage_salience", "model"),
-        ("IIC_ALERT_GATE_LLM_PROVIDER", "alert_gate",      "provider"),
-        ("IIC_ALERT_GATE_LLM_MODEL",    "alert_gate",      "model"),
+        ("IIC_TRIAGE_LLM_MODEL",       "triage_salience", "model"),
+        ("IIC_ALERT_GATE_LLM_PROVIDER", "alert_gate",     "provider"),
+        ("IIC_ALERT_GATE_LLM_MODEL",    "alert_gate",     "model"),
     ]
     for env_var, role, field in _role_env_map:
         val = os.environ.get(env_var)
@@ -166,6 +166,7 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     "prompt_cache_prior_pack_budget_chars": 8000,
     "prompt_cache_memory_budget_chars": 6000,
     # LLM settings
+    # Per-role LLM routing overrides live in "llm_roles" below (cutover = env flip; see that block).
     "llm_provider": "deepseek",
     "deep_think_llm": "deepseek-v4-pro",     # V4 thinking flagship; deep reasoning / synthesis (effort=max)
     "quick_think_llm": "deepseek-v4-flash",  # V4 thinking fast model; analyst tool loops (default effort)
