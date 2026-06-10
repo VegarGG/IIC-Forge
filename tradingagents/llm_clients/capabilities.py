@@ -86,7 +86,12 @@ _MINIMAX_THINKING = ModelCapabilities(
 _DEFAULT = ModelCapabilities(
     supports_tool_choice=True,
     supports_json_mode=True,
-    supports_json_schema=True,
+    # Fail-closed: json_schema binding is opt-in per explicit capability row.
+    # An unrowed model (qwen-max, glm-4.x, openrouter slugs, etc.) must never
+    # receive response_format=json_schema — that hard-400s from unknown providers
+    # and crash-loops triage or bricks the evaluator.  Only rows that have been
+    # verified against the provider's API spec set supports_json_schema=True.
+    supports_json_schema=False,
     preferred_structured_method="function_calling",
 )
 

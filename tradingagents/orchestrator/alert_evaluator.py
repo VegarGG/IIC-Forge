@@ -43,11 +43,11 @@ def alert_evaluation_response_format() -> Dict[str, Any]:
         fmt = alert_evaluation_response_format()
         response = llm.invoke(prompt, response_format=fmt)
 
-    The evaluator does NOT attach this to its current ``llm.invoke(prompt)``
-    call because several providers (DeepSeek) reject ``response_format``
-    json_schema and changing that behavior is out of scope for Task 10.
-    Wiring response_format conditionally via capabilities.supports_json_schema
-    is deferred to Task 14.
+    Binding is capability-gated: ``evaluate_alert_candidate`` calls
+    ``get_capabilities(model_id).supports_json_schema`` and attaches this
+    format via ``llm.bind(response_format=...)`` only when the resolved model
+    supports grammar-constrained decoding.  DeepSeek/MiniMax API models and
+    any unrowed model id are left unbound and receive plain free-text prompting.
     """
     return {
         "type": "json_schema",

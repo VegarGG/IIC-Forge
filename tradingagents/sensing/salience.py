@@ -79,10 +79,10 @@ def salience_response_format() -> Dict[str, Any]:
         fmt = salience_response_format()
         response = llm.invoke(prompt, response_format=fmt)
 
-    The scorer itself does not attach this to its ``llm_call`` closure today
-    because the closure is a plain ``lambda prompt: llm.invoke(prompt)``
-    (see triage._main).  Wiring response_format into the actual request is
-    deferred to Task 14 which can update the closure signature.
+    Binding is handled by ``maybe_bind_salience_schema`` (below), which is
+    called in ``triage._main`` immediately after ``create_role_llm``.  The
+    bind is capability-gated: only models with ``supports_json_schema=True``
+    in the capability table receive the format; all others are left unbound.
     """
     return {
         "type": "json_schema",

@@ -38,42 +38,15 @@ _BASE_CFG_LOCAL = {
     },
 }
 
-_BASE_CFG_DEEPSEEK = {
-    "llm_provider": "deepseek",
-    "quick_think_llm": "deepseek-v4-flash",
-    "backend_url": None,
-    "llm_roles": {
-        "alert_evaluator": {
-            "provider": "local",
-            "model": "deepseek-v4-flash",
-            "base_url": None,
-        }
-    },
-}
-
-
 def _make_local_cfg(base_url: str) -> dict:
     cfg = copy.deepcopy(_BASE_CFG_LOCAL)
     cfg["llm_roles"]["triage_salience"]["base_url"] = base_url
     return cfg
 
 
-def _make_deepseek_cfg(base_url: str) -> dict:
-    cfg = copy.deepcopy(_BASE_CFG_DEEPSEEK)
-    cfg["llm_roles"]["alert_evaluator"]["base_url"] = base_url
-    return cfg
-
-
 # ---------------------------------------------------------------------------
 # Evaluator: wire assertion via stub server
 # ---------------------------------------------------------------------------
-
-_VALID_EVAL_JSON = (
-    '{"decision":"pass","score":0.91,"materiality":"earnings surprise",'
-    '"actionability":"watchlist thesis may change",'
-    '"ticker_link_evidence":"NVDA named directly","novelty":"new filing",'
-    '"disqualifiers":[],"reasons":["direct and material"]}'
-)
 
 
 class TestEvaluatorJsonSchemaBinding:
@@ -91,10 +64,6 @@ class TestEvaluatorJsonSchemaBinding:
         from tradingagents.orchestrator.alert_evaluator import evaluate_alert_candidate
 
         cfg = _make_local_cfg(stub_openai_server.url + "/v1")
-        # Override stub response so evaluate_alert_candidate gets parseable JSON.
-        # The stub returns '{"ok": true}' by default which won't parse as
-        # AlertEvaluationPayload — but we only care about the wire body shape,
-        # and the parse result is fine to be a reject sentinel.
         client = create_role_llm("triage_salience", cfg)
         llm = client.get_llm()
 
@@ -145,41 +114,6 @@ class TestEvaluatorJsonSchemaBinding:
             f"Expected NO response_format for incapable model; "
             f"got keys: {list(body.keys())}"
         )
-
-    @pytest.mark.unit
-    def test_model_id_none_no_bind(
-        self, stub_openai_server, monkeypatch
-    ):
-        """model_id=None (BareLLM, no model_name): no bind, no response_format."""
-        monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
-        monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
-
-        from tradingagents.llm_clients.factory import create_role_llm
-        from tradingagents.orchestrator.alert_evaluator import evaluate_alert_candidate
-
-        cfg = _make_local_cfg(stub_openai_server.url + "/v1")
-        client = create_role_llm("triage_salience", cfg)
-        llm = client.get_llm()
-
-        # model_id=None means no capability lookup → no bind
-        evaluate_alert_candidate(
-            llm=llm,
-            event_text="generic market chatter",
-            tickers=["AAPL"],
-            min_score=0.80,
-            model_id=None,
-        )
-
-        body = stub_openai_server.last_request_json
-        assert body is not None
-        # model_name on ChatOpenAI is the model kwarg ("qwen3.6-27b…"), so the
-        # resolved_model_id would be that — but we explicitly passed model_id=None
-        # which is the override, and _resolve_model_id returns None only when
-        # model_id=None AND llm has no model_name.  The actual llm here DOES
-        # have model_name, so resolved_model_id is the llm's model_name, not None.
-        # This test becomes equivalent to test_capable_model_sends_json_schema_response_format
-        # because the llm has model_name="qwen3.6-27b-instruct-q4_k_m".
-        # Instead, test with a BareLLM that has no model_name at all.
 
 
 @pytest.mark.unit
@@ -414,13 +348,65 @@ class TestTriageMainBindsWhenCapable:
         """If the bind line is removed from _main, maybe_bind_salience_schema is
         not called, and this test fails — proving the deletion would break the gate.
 
-        Implementation: we verify that the source of _main contains the bind call.
-        This is a lightweight guard that fails exactly when the bind line is deleted.
+        Implementation: we verify that the source of _main contains the actual
+        function *call* (with opening paren), not merely the import/reference.
+        Matching just the bare name would pass even when the import is present
+        but the call line is deleted — the paren anchor prevents that false-green.
         """
         import inspect
         from tradingagents.sensing import triage
         src = inspect.getsource(triage._main)
-        assert "maybe_bind_salience_schema" in src, (
-            "_main must call maybe_bind_salience_schema to attach json_schema "
+        assert "maybe_bind_salience_schema(" in src, (
+            "_main must call maybe_bind_salience_schema(...) to attach json_schema "
             "response_format — deleting this line breaks the D4 L1 exit gate."
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: unknown model ids must NOT receive json_schema binding (fail-closed)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_unknown_model_id_no_json_schema_capability():
+    """get_capabilities for a totally unknown model id must return supports_json_schema=False.
+
+    json_schema binding is opt-in via an explicit capability row.  An unrowed
+    model (qwen-max, glm-4.x, openrouter slugs, etc.) must never get
+    response_format=json_schema attached — that would hard-400 from unknown
+    providers and crash-loop triage or brick the evaluator.
+    """
+    from tradingagents.llm_clients.capabilities import get_capabilities
+    caps = get_capabilities("totally-unknown-model-xyz")
+    assert caps.supports_json_schema is False, (
+        "Unknown model ids must fail-closed: supports_json_schema must be False "
+        "for 'totally-unknown-model-xyz' (got True, meaning _DEFAULT is still True)"
+    )
+
+
+@pytest.mark.unit
+def test_unknown_model_id_no_bind_wire(stub_openai_server, monkeypatch):
+    """maybe_bind_salience_schema must NOT attach response_format for unknown model ids.
+
+    Wire-level assertion via the stub server: the request body must have no
+    response_format key when the model_id is totally unknown (falls through to
+    _DEFAULT which must have supports_json_schema=False after Fix 1).
+    """
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+
+    from tradingagents.llm_clients.factory import create_role_llm
+    from tradingagents.sensing.salience import maybe_bind_salience_schema
+
+    cfg = _make_local_cfg(stub_openai_server.url + "/v1")
+    client = create_role_llm("triage_salience", cfg)
+    llm = client.get_llm()
+
+    result_llm = maybe_bind_salience_schema(llm, "totally-unknown-model-xyz")
+    result_llm.invoke("classify this")
+
+    body = stub_openai_server.last_request_json
+    assert body is not None, "Stub server did not receive any request"
+    assert "response_format" not in body, (
+        f"Unknown model 'totally-unknown-model-xyz' must NOT receive "
+        f"response_format=json_schema (fail-closed); got keys: {list(body.keys())}"
+    )
