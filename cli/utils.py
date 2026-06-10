@@ -7,7 +7,7 @@ from dotenv import find_dotenv, set_key
 from rich.console import Console
 
 from cli.models import AnalystType, AssetType
-from tradingagents.llm_clients.api_key_env import get_api_key_env
+from tradingagents.llm_clients.api_key_env import get_api_key_env, is_optional_key
 from tradingagents.llm_clients.model_catalog import get_model_options
 
 console = Console()
@@ -506,6 +506,11 @@ def ensure_api_key(provider: str) -> Optional[str]:
     existing = os.environ.get(env_var)
     if existing:
         return existing
+
+    if is_optional_key(provider):
+        # Optional-key providers (e.g. local/llama-server) work without
+        # authentication; never prompt for a key the server doesn't require.
+        return None
 
     console.print(
         f"\n[yellow]{env_var} is not set in your environment.[/yellow]"

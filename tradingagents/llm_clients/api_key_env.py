@@ -7,6 +7,11 @@ ask "does this provider require a key, and which env var is it?".
 
 When adding a new provider, register its env var here so the CLI flow
 prompts for it automatically instead of failing on first API call.
+
+Note: a non-None env var does NOT automatically mean the CLI will prompt
+for it. Providers listed in OPTIONAL_KEY_PROVIDERS (e.g. "local") have an
+env var for when a key *is* configured, but ensure_api_key will never
+interactively prompt for them — missing optional keys are silently ignored.
 """
 
 from __future__ import annotations

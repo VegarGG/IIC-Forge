@@ -1,6 +1,7 @@
 import pytest
 from tradingagents.llm_clients.factory import create_llm_client, _OPENAI_COMPATIBLE
 from tradingagents.llm_clients.openai_client import _resolve_provider_base_url
+from tradingagents.llm_clients.api_key_env import is_optional_key
 
 
 @pytest.mark.unit
@@ -9,7 +10,8 @@ def test_local_is_openai_compatible():
 
 
 @pytest.mark.unit
-def test_local_default_base_url():
+def test_local_default_base_url(monkeypatch):
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
     assert _resolve_provider_base_url("local") == "http://127.0.0.1:8080/v1"
 
 
@@ -28,10 +30,8 @@ def test_local_client_builds_without_api_key(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 2: Optional-key provider semantics
+# Optional-key provider semantics
 # ---------------------------------------------------------------------------
-
-from tradingagents.llm_clients.api_key_env import OPTIONAL_KEY_PROVIDERS, is_optional_key
 
 
 @pytest.mark.unit
@@ -45,3 +45,15 @@ def test_local_uses_api_key_when_present(monkeypatch):
     monkeypatch.setenv("LOCAL_LLM_API_KEY", "sk-lan-secret")
     llm = create_llm_client(provider="local", model="qwen3.6-27b-instruct-q4_k_m").get_llm()
     assert llm.openai_api_key.get_secret_value() == "sk-lan-secret"
+
+
+# ---------------------------------------------------------------------------
+# Regression: required providers must still raise when key is absent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_required_provider_still_raises_without_key(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
+        create_llm_client(provider="deepseek", model="deepseek-chat").get_llm()
