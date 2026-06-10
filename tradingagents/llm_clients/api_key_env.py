@@ -30,9 +30,27 @@ PROVIDER_API_KEY_ENV: dict[str, Optional[str]] = {
     "minimax":    "MINIMAX_API_KEY",
     "minimax-cn": "MINIMAX_CN_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
-    # Local runtimes do not authenticate.
+    # Local runtimes: ollama never authenticates; local (llama-server) can
+    # optionally authenticate via LOCAL_LLM_API_KEY but does not require it.
     "ollama":     None,
+    "local":      "LOCAL_LLM_API_KEY",
 }
+
+# Providers where the API key is optional — the server works without one
+# (e.g. llama-server on a trusted LAN, or Ollama which never authenticates).
+# get_llm must NOT raise when the env var is absent for these providers.
+OPTIONAL_KEY_PROVIDERS: frozenset[str] = frozenset({"local", "ollama"})
+
+
+def is_optional_key(provider: str) -> bool:
+    """Return True if the API key is optional for ``provider``.
+
+    Optional-key providers build a working LLM client even when their
+    mapped env var is unset. The server *may* require a key (e.g.
+    ``llama-server --api-key``) but the client must not fail at
+    construction time if it is absent.
+    """
+    return provider.lower() in OPTIONAL_KEY_PROVIDERS
 
 
 def get_api_key_env(provider: str) -> Optional[str]:

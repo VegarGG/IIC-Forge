@@ -4,7 +4,7 @@ from typing import Any, Optional
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
-from .api_key_env import get_api_key_env
+from .api_key_env import get_api_key_env, is_optional_key
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
 from .validators import validate_model
@@ -158,20 +158,25 @@ _PROVIDER_BASE_URL = {
     "minimax-cn": "https://api.minimaxi.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "ollama":     "http://localhost:11434/v1",
+    "local":      "http://127.0.0.1:8080/v1",
 }
 
 
 def _resolve_provider_base_url(provider: str) -> Optional[str]:
     """Default base URL for ``provider``, with env-var overrides where defined.
 
-    Currently only Ollama supports an env-var override (``OLLAMA_BASE_URL``),
-    matching the convention in the broader Ollama tooling ecosystem so users
-    can point at a remote ollama-serve without editing code. The check is
+    Ollama supports ``OLLAMA_BASE_URL`` (matching the broader Ollama tooling
+    ecosystem). Local (llama-server) supports ``LOCAL_LLM_BASE_URL`` so users
+    can point at a remote server without editing code. Both checks are
     call-time, not import-time, so tests that monkeypatch the env after
     import behave correctly.
     """
     if provider == "ollama":
         env_url = os.environ.get("OLLAMA_BASE_URL")
+        if env_url:
+            return env_url
+    if provider == "local":
+        env_url = os.environ.get("LOCAL_LLM_BASE_URL")
         if env_url:
             return env_url
     return _PROVIDER_BASE_URL.get(provider)
@@ -211,6 +216,11 @@ class OpenAIClient(BaseLLMClient):
                 api_key = os.environ.get(api_key_env)
                 if api_key:
                     llm_kwargs["api_key"] = api_key
+                elif is_optional_key(self.provider):
+                    # Optional-key providers (e.g. local/llama-server on a LAN)
+                    # work without authentication; fall through to the sentinel
+                    # so ChatOpenAI does not complain about a missing key.
+                    llm_kwargs["api_key"] = "local"
                 else:
                     raise ValueError(
                         f"API key for provider '{self.provider}' is not set. "
