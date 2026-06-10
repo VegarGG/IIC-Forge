@@ -101,13 +101,15 @@ def evaluate_alert_candidate(
     resolved_model_id = _resolve_model_id(llm, model_id)
 
     t0 = time.monotonic()
-    resp = llm.invoke(prompt)
-    latency_ms = int((time.monotonic() - t0) * 1000)
-
-    raw = getattr(resp, "content", str(resp))
+    latency_ms: Optional[int] = None
     try:
+        resp = llm.invoke(prompt)
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        raw = getattr(resp, "content", str(resp))
         payload = AlertEvaluationPayload.model_validate(json.loads(raw))
     except (json.JSONDecodeError, ValidationError, TypeError, ValueError):
+        if latency_ms is None:
+            latency_ms = int((time.monotonic() - t0) * 1000)
         return AlertEvaluation(
             passed=False,
             score=0.0,

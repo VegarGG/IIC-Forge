@@ -300,6 +300,70 @@ class TestFetchAlertEvalTelemetry:
 # alert_evaluation_response_format helper
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Issue 2: invoke-raise exception contract — llm.invoke raising ValueError/TypeError
+# must return the reject sentinel, NOT propagate the exception
+# ---------------------------------------------------------------------------
+
+class TestEvaluateAlertCandidateInvokeRaises:
+    """llm.invoke raising ValueError or TypeError must NOT propagate — the
+    evaluator must return the reject sentinel with parse_ok=False and
+    latency_ms as a non-null int >= 0."""
+
+    def _make_error_llm(self, exc, model_name="error-model"):
+        class ErrorLLM:
+            def invoke(self, prompt):
+                raise exc
+
+        obj = ErrorLLM()
+        obj.model_name = model_name
+        return obj
+
+    def test_invoke_value_error_returns_reject_sentinel(self):
+        llm = self._make_error_llm(ValueError("bad response from provider"))
+        result = evaluate_alert_candidate(
+            llm=llm,
+            event_text="NVDA earnings blowout.",
+            tickers=["NVDA"],
+            min_score=0.80,
+        )
+        assert result.passed is False
+        assert "invalid_json" in result.disqualifiers
+        assert result.parse_ok is False
+        assert result.model_id == "error-model"
+        assert result.latency_ms is not None
+        assert isinstance(result.latency_ms, int)
+        assert result.latency_ms >= 0
+
+    def test_invoke_type_error_returns_reject_sentinel(self):
+        llm = self._make_error_llm(TypeError("unexpected type"))
+        result = evaluate_alert_candidate(
+            llm=llm,
+            event_text="generic chatter",
+            tickers=["AAPL"],
+            min_score=0.80,
+        )
+        assert result.passed is False
+        assert "invalid_json" in result.disqualifiers
+        assert result.parse_ok is False
+        assert result.latency_ms is not None
+        assert isinstance(result.latency_ms, int)
+        assert result.latency_ms >= 0
+
+    def test_invoke_raises_does_not_propagate(self):
+        """Ensure no exception leaks out of evaluate_alert_candidate."""
+        llm = self._make_error_llm(ValueError("boom"))
+        try:
+            result = evaluate_alert_candidate(
+                llm=llm,
+                event_text="some text",
+                tickers=["TSLA"],
+                min_score=0.80,
+            )
+        except (ValueError, TypeError) as e:
+            pytest.fail(f"evaluate_alert_candidate propagated exception: {e}")
+
+
 class TestAlertEvaluationResponseFormat:
     def test_returns_dict_with_json_schema_type(self):
         fmt = alert_evaluation_response_format()

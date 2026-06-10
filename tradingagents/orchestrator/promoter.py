@@ -78,6 +78,9 @@ def run_once(
                     score=evaluation.score,
                     payload=evaluation.payload,
                     created_ts=_now_utc().isoformat(),
+                    model_id=evaluation.model_id,
+                    parse_ok=evaluation.parse_ok,
+                    latency_ms=evaluation.latency_ms,
                 )
                 if not evaluation.passed:
                     log.info(
