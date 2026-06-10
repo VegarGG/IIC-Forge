@@ -136,10 +136,14 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
         return payload
 
 
-# Kwargs forwarded from user config to ChatOpenAI
+# Kwargs forwarded from user config to ChatOpenAI.
+# ``extra_body`` carries provider-specific request-body fields (e.g.
+# llama-server's ``chat_template_kwargs``) that are not part of the
+# standard OpenAI spec but are forwarded verbatim by langchain-openai.
 _PASSTHROUGH_KWARGS = (
     "timeout", "max_retries", "reasoning_effort",
     "api_key", "callbacks", "http_client", "http_async_client",
+    "extra_body",
 )
 
 # Provider base URLs. API-key env vars live in api_key_env.PROVIDER_API_KEY_ENV
