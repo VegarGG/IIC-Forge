@@ -315,10 +315,11 @@ async def test_sync_callable_returning_coroutine_succeeds():
 
 @pytest.mark.unit
 async def test_async_callable_object_succeeds():
-    """An object with async __call__ should be awaited directly, not run in to_thread.
+    """An object with async __call__ should produce source='llm', not hang or deferred.
 
-    inspect.iscoroutinefunction() returns True for instances whose __call__ is
-    defined with 'async def', so this tests the async branch of _invoke_llm.
+    inspect.iscoroutinefunction() returns False for instances whose __call__ is
+    defined with 'async def' — such objects take the to_thread branch and are
+    rescued by the __await__ fallback.  The result must still be source='llm'.
     """
     import warnings
     from tradingagents.sensing.salience import SalienceScorer
@@ -348,3 +349,67 @@ async def test_async_callable_object_succeeds():
         "An object with async __call__ must be invoked via await, not to_thread."
     )
     assert abs(result.salience - 0.8) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Test 8: memory DB guard — Triage must raise ValueError when conn is :memory:
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_triage_rejects_memory_db():
+    """Triage must raise ValueError when the conn is an :memory: (or temp) DB.
+
+    _open_ds2_conn calls sqlite3.connect('') for :memory: conns because
+    PRAGMA database_list returns file='' — silently opening an anonymous temp
+    DB with no schema.  The guard must catch this at construction time.
+    """
+    import sqlite3
+    import fakeredis.aioredis
+    from tradingagents.sensing.triage import Triage
+    from tradingagents.sensing.embeddings import MockEmbedder
+
+    mem_conn = sqlite3.connect(":memory:")
+
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    with pytest.raises(ValueError, match="file-backed"):
+        Triage(
+            conn=mem_conn,
+            redis=r,
+            embedder=MockEmbedder(),
+            llm_call=lambda p: "{}",
+            data_dir="/tmp/triage-test-memory-guard",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 9: FK enforcement on ds2 connection — orphan insert must raise
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_ds2_conn_enforces_foreign_keys(tmp_path):
+    """The ds2 connection opened by _open_ds2_conn must have FK enforcement on.
+
+    Without PRAGMA foreign_keys=ON an orphan insert into event_embeddings
+    (referencing a nonexistent event_id) silently succeeds.  With the pragma
+    it must raise IntegrityError.
+    """
+    import sqlite3
+    from tradingagents.persistence.db import connect
+    from tradingagents.sensing.triage import _open_ds2_conn
+
+    db_file = str(tmp_path / "iic.db")
+    # connect() sets up the schema (including event_embeddings FK constraint).
+    main_conn = connect(db_file)
+
+    ds2_conn = _open_ds2_conn(db_file)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            ds2_conn.execute(
+                "INSERT INTO event_embeddings (event_id, vec_id, created_ts)"
+                " VALUES (?, ?, ?)",
+                ("nonexistent-event-id-xyz", 1, "2024-01-01T00:00:00+00:00"),
+            )
+            ds2_conn.commit()
+    finally:
+        ds2_conn.close()
+        main_conn.close()

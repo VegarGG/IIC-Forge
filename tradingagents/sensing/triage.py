@@ -55,11 +55,17 @@ def _open_ds2_conn(db_path: str) -> sqlite3.Connection:
     connect() helper is intentionally not used here to avoid changing its
     global signature; we load sqlite_vec ourselves so KNN queries work.
     """
+    if not db_path:
+        raise ValueError(
+            "Triage requires a file-backed sqlite DB; "
+            ":memory:/temp DBs cannot be shared across connections"
+        )
     import sqlite_vec as _sqlite_vec
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     ds2_conn = sqlite3.connect(db_path, check_same_thread=False)
     ds2_conn.row_factory = sqlite3.Row
     ds2_conn.execute("PRAGMA busy_timeout=5000")
+    ds2_conn.execute("PRAGMA foreign_keys=ON")
     ds2_conn.enable_load_extension(True)
     _sqlite_vec.load(ds2_conn)
     ds2_conn.enable_load_extension(False)

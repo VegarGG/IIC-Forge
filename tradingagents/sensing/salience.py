@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import re
 from dataclasses import dataclass, field
@@ -159,17 +160,15 @@ class SalienceScorer:
         # asyncio.to_thread propagates exceptions normally, so the
         # deferred-sentinel path in score() keeps working unchanged.
         #
-        # Belt-and-braces await-detection (restored): first check whether the
-        # callable itself is a coroutine function (async def / async __call__) and
-        # if so await it directly.  For everything else run via to_thread, then
-        # check whether the returned value is itself awaitable — a sync function
-        # that returns a coroutine object (e.g. a factory wrapping an async inner)
-        # must be awaited or the coroutine is never executed and _parse receives a
-        # coroutine object instead of a str, silently producing source='deferred'.
-        import inspect
+        # Belt-and-braces await-detection: first check whether the callable is
+        # a plain async def coroutine function via inspect.iscoroutinefunction.
+        # NOTE: objects with an async __call__ method return False from
+        # iscoroutinefunction — they take the to_thread branch below and are
+        # rescued by the __await__ fallback.  Only bare async def functions (or
+        # callables whose __call__ passes iscoroutinefunction) reach the direct-
+        # await branch.  Either way the result is a plain str before _parse.
         if inspect.iscoroutinefunction(self._llm):
-            # Async callable (async def function or object with async __call__):
-            # await the coroutine directly on the event loop.
+            # Plain async def function: await the coroutine directly on the event loop.
             return await self._llm(prompt)
         # Sync callable: dispatch to a worker thread so the event loop stays live.
         out = await asyncio.to_thread(self._llm, prompt)
