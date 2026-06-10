@@ -571,10 +571,24 @@ def _main() -> None:
     # SystemError('error return without exception set') (NOT a sqlite3.Error,
     # so it escapes the persistence except-nets into process_one) and loses
     # persisted bumps.
+    # Task 17 self-alert: when the consecutive deferred run reaches the
+    # role's fallback_threshold (the documented alert-threshold source — no
+    # new config key), the counter fires the operator self-alert EXACTLY
+    # ONCE per outage (debounced in the counter, re-armed by
+    # record_success).  Lock discipline: record_failure releases the SHARED
+    # avail_lock BEFORE invoking the callback, so the (possibly blocking)
+    # transport send never holds the lock the to_thread budget workers need.
+    # The callback runs on whichever thread recorded the crossing failure —
+    # here that is process_one on the event-loop thread; at most one
+    # blocking send per outage is an accepted stall.
+    from tradingagents.ops import self_alert
+    alerter = self_alert.build_self_alerter(C)
     avail_conn = _open_cross_thread_conn(C["iic_db_path"])
     avail_lock = threading.Lock()
     availability_counter = AvailabilityCounter(
-        name=TRIAGE_FAILURE_COUNTER, conn=avail_conn, lock=avail_lock)
+        name=TRIAGE_FAILURE_COUNTER, conn=avail_conn, lock=avail_lock,
+        alert_threshold=fallback_threshold,
+        on_threshold=alerter.endpoint_down_callback)
     fallback_budget = DailyFallbackBudget(
         name=TRIAGE_FALLBACK_BUDGET,
         max_per_day=int(role_cfg.get("fallback_daily_budget", 500)),

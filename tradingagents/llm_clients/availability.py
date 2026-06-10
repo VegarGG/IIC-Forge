@@ -38,7 +38,7 @@ import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import httpx
 import openai
@@ -189,10 +189,25 @@ class AvailabilityCounter:
     bumps.  The default per-instance lock is safe only when this object is
     the connection's sole cross-thread user (the promoter: single-threaded,
     own conn).
+
+    Self-alert seam (Task 17): when BOTH ``alert_threshold`` and
+    ``on_threshold`` are given, the failure that brings ``consecutive`` up
+    to the threshold invokes ``on_threshold(self)`` EXACTLY ONCE per outage:
+    the debounce latch is set inside the lock (so a concurrent burst of
+    failures cannot double-fire) and re-armed by ``record_success`` — the
+    next outage alerts again.  The callback itself runs OUTSIDE the lock,
+    AFTER it is released: the lock may be shared (triage) and the callback
+    may do blocking transport I/O or even touch this counter again, neither
+    of which may deadlock or stall other lock holders.  Callback exceptions
+    are swallowed (logged) — the operator channel must never crash the
+    daemon's loop.
     """
 
     def __init__(self, *, name: str, conn: Optional[sqlite3.Connection] = None,
-                 lock: Optional[threading.Lock] = None):
+                 lock: Optional[threading.Lock] = None,
+                 alert_threshold: Optional[int] = None,
+                 on_threshold: Optional[
+                     Callable[["AvailabilityCounter"], None]] = None):
         self.name = name
         self._conn = conn
         self._lock = lock if lock is not None else threading.Lock()
@@ -200,8 +215,14 @@ class AvailabilityCounter:
         self.total = 0
         self.last_failure_ts: Optional[str] = None
         self.last_reason: str = ""
+        # Task 17: both must be provided to arm the seam (see class docstring).
+        self.alert_threshold = (int(alert_threshold)
+                                if alert_threshold is not None else None)
+        self._on_threshold = on_threshold
+        self._alerted_since_last_success = False
 
     def record_failure(self, reason: str = "") -> None:
+        fire = False
         with self._lock:
             self.consecutive += 1
             self.total += 1
@@ -215,11 +236,29 @@ class AvailabilityCounter:
                     store.bump_ops_counter(self._conn, name=self.name)
                 except sqlite3.Error:
                     log.exception("failed to persist ops counter %s", self.name)
+            # Task 17 debounce: latch INSIDE the lock (single firer per
+            # outage), fire OUTSIDE it.  ``>=`` not ``==`` so a crossing can
+            # never be missed; the latch alone prevents repeats.
+            if (self._on_threshold is not None
+                    and self.alert_threshold is not None
+                    and not self._alerted_since_last_success
+                    and self.consecutive >= self.alert_threshold):
+                self._alerted_since_last_success = True
+                fire = True
+        if fire:
+            try:
+                self._on_threshold(self)
+            except Exception:  # noqa: BLE001 — alerting is best-effort
+                log.exception(
+                    "on_threshold self-alert callback failed for counter %s",
+                    self.name)
 
     def record_success(self) -> None:
-        """A successful LLM call: reset the consecutive run (total is monotonic)."""
+        """A successful LLM call: reset the consecutive run (total is monotonic)
+        and re-arm the Task 17 self-alert latch (next outage alerts again)."""
         with self._lock:
             self.consecutive = 0
+            self._alerted_since_last_success = False
 
 
 class DailyFallbackBudget:

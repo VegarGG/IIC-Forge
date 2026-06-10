@@ -302,8 +302,12 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     # to start / skips cycles) or "api" (after fallback_threshold consecutive
     # runtime failures — or a failed startup probe — the role re-resolves to
     # the GLOBAL provider, hard-bounded by fallback_daily_budget calls per UTC
-    # day). The threshold/budget keys only matter when fallback="api", so the
-    # all-None production-default behavior is unchanged.
+    # day). The budget key only matters when fallback="api", so the all-None
+    # production-default behavior is unchanged. fallback_threshold ALSO arms
+    # the Task 17 endpoint-down self-alert in every fallback mode: when a
+    # daemon's consecutive-failure run reaches it, ONE operator self-alert is
+    # emitted per outage (tradingagents/ops/self_alert.py; re-armed on the
+    # next successful call).
     "llm_roles": {
         "triage_salience": {"provider": None, "model": None, "base_url": None,
                             "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},

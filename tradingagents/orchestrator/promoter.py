@@ -195,8 +195,18 @@ def main(config: Optional[dict] = None) -> None:
     # record_success / try_consume all run inline on the loop thread, and the
     # conn is check_same_thread=True anyway.  (Contrast triage._main, which
     # must pass ONE shared lock for its cross-thread conn.)
+    #
+    # Task 17 self-alert: when the consecutive run reaches the role's
+    # fallback_threshold (the documented alert-threshold source — no new
+    # config key), the counter fires the operator self-alert EXACTLY ONCE
+    # per outage (debounced in the counter, re-armed by record_success).
+    # The callback runs outside the counter lock, inline on this loop thread.
+    from tradingagents.ops import self_alert
+    alerter = self_alert.build_self_alerter(cfg)
     avail_counter = AvailabilityCounter(
-        name=PROMOTER_FAILURE_COUNTER, conn=conn)
+        name=PROMOTER_FAILURE_COUNTER, conn=conn,
+        alert_threshold=fallback_threshold,
+        on_threshold=alerter.endpoint_down_callback)
     fallback_budget = DailyFallbackBudget(
         name=PROMOTER_FALLBACK_BUDGET,
         max_per_day=int(role_cfg.get("fallback_daily_budget", 500)),
