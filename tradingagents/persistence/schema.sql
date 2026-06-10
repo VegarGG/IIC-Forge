@@ -302,3 +302,61 @@ ALTER TABLE costs ADD COLUMN cache_miss_tokens INTEGER;
 ALTER TABLE alert_evaluations ADD COLUMN model_id    TEXT;
 ALTER TABLE alert_evaluations ADD COLUMN parse_ok    INTEGER;
 ALTER TABLE alert_evaluations ADD COLUMN latency_ms  INTEGER;
+
+-- ============================================================
+-- Task 13: shadow_eval — per-call rows from the replay harness
+-- ============================================================
+-- Each row records one event replayed through BOTH the API quick model and a
+-- local candidate model.  A row may exercise one role only:
+--   * Triage role only  → api_salience/local_salience/salience_delta set;
+--                          api_verdict/local_verdict are NULL.
+--   * Alert-gate only   → api_verdict/local_verdict set;
+--                          salience columns are NULL.
+--   * Both roles        → all columns non-NULL.
+--
+-- Column semantics:
+--   shadow_id       — autoincrement surrogate PK; defines insertion order.
+--   event_id        — TEXT (NOT NULL): the replayed event.  Intentionally a
+--                     plain TEXT column with NO FK to events(event_id) so that
+--                     shadow evidence rows are immune to event-lifecycle
+--                     operations (deletions or pruning).  Sibling tables such
+--                     as event_ticker and event_fingerprints use FK + ON DELETE
+--                     CASCADE; we deviate here so that shadow rows survive event
+--                     deletion and remain available for the Task-14 reporter.
+--   model_id        — TEXT NOT NULL: identifier of the candidate model under
+--                     test (e.g. "deepseek-r1-0528").
+--   api_salience    — REAL nullable: salience score produced by the API model
+--                     for the triage role.  NULL for verdict-only rows.
+--   local_salience  — REAL nullable: salience score produced by the local
+--                     candidate.  NULL for verdict-only rows.
+--   salience_delta  — REAL nullable: local_salience − api_salience, stored
+--                     explicitly (derivable but pre-computed by the harness for
+--                     direct MAE queries).  NULL for verdict-only rows or when
+--                     either salience is NULL.
+--   api_verdict     — TEXT nullable: 'pass'/'reject' from the API alert-gate.
+--                     NULL for triage-only rows.
+--   local_verdict   — TEXT nullable: 'pass'/'reject' from the local
+--                     alert-gate.  NULL for triage-only rows.
+--   parse_ok        — INTEGER (0/1 NOT NULL): whether the local model's
+--                     response was successfully parsed by the harness.  The
+--                     harness gates on parse failures; this column enables
+--                     per-model parse-failure-rate analysis.
+--   latency_ms      — INTEGER nullable: wall-clock latency of the LOCAL model
+--                     call in milliseconds.  NULL if not measured.
+--   created_ts      — TEXT NOT NULL: UTC ISO-8601 timestamp when this row was
+--                     written (same convention as all other created_ts columns
+--                     in this schema).
+CREATE TABLE IF NOT EXISTS shadow_eval (
+    shadow_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id        TEXT    NOT NULL,               -- plain TEXT; no FK (see comment above)
+    model_id        TEXT    NOT NULL,               -- candidate model under test
+    api_salience    REAL,                           -- API triage score; NULL for verdict-only rows
+    local_salience  REAL,                           -- local triage score; NULL for verdict-only rows
+    salience_delta  REAL,                           -- local − api; NULL when salience not exercised
+    api_verdict     TEXT,                           -- 'pass'/'reject'; NULL for triage-only rows
+    local_verdict   TEXT,                           -- 'pass'/'reject'; NULL for triage-only rows
+    parse_ok        INTEGER NOT NULL DEFAULT 1,     -- 1 = local parse succeeded; 0 = failed
+    latency_ms      INTEGER,                        -- local model wall-clock latency (ms)
+    created_ts      TEXT    NOT NULL                -- UTC ISO-8601 string
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_eval_model ON shadow_eval(model_id);

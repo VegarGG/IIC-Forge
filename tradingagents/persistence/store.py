@@ -595,3 +595,79 @@ def update_brief_analysis_pack(
         (analysis_pack_id, brief_id),
     )
     conn.commit()
+
+
+# --------------------------------------------------------------------
+# Task 13: shadow_eval — per-call rows from the replay harness
+# --------------------------------------------------------------------
+
+def insert_shadow_eval(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    model_id: str,
+    api_salience: Optional[float],
+    local_salience: Optional[float],
+    salience_delta: Optional[float],
+    api_verdict: Optional[str],
+    local_verdict: Optional[str],
+    parse_ok: bool,
+    latency_ms: Optional[int],
+    created_ts: str,
+) -> int:
+    """Insert one shadow-replay row and return its shadow_id.
+
+    A row may cover the triage role only (salience columns set, verdict columns
+    NULL), the alert-gate role only (verdict columns set, salience columns NULL),
+    or both roles simultaneously.  ``parse_ok`` records whether the LOCAL model
+    response was parseable; ``latency_ms`` is the LOCAL call's wall-clock time.
+    """
+    cur = conn.execute(
+        "INSERT INTO shadow_eval "
+        "(event_id, model_id, api_salience, local_salience, salience_delta, "
+        "api_verdict, local_verdict, parse_ok, latency_ms, created_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            event_id,
+            model_id,
+            api_salience,
+            local_salience,
+            salience_delta,
+            api_verdict,
+            local_verdict,
+            1 if parse_ok else 0,
+            latency_ms,
+            created_ts,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def fetch_shadow_eval(
+    conn: sqlite3.Connection,
+    *,
+    model_id: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> list[dict]:
+    """Return shadow_eval rows for the Task-14 reporter.
+
+    Columns returned: shadow_id, event_id, model_id, api_salience,
+    local_salience, salience_delta, api_verdict, local_verdict, parse_ok,
+    latency_ms, created_ts.
+
+    Optionally filter by ``model_id``.  Optionally cap results with ``limit``.
+    Rows are ordered by shadow_id (insertion order) — stable for MAE /
+    agreement / κ / latency-percentile queries.
+    """
+    where = "WHERE model_id = ? " if model_id is not None else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit is not None else ""
+    sql = (
+        "SELECT shadow_id, event_id, model_id, "
+        "api_salience, local_salience, salience_delta, "
+        "api_verdict, local_verdict, parse_ok, latency_ms, created_ts "
+        f"FROM shadow_eval {where}ORDER BY shadow_id {limit_clause}"
+    )
+    params = (model_id,) if model_id is not None else ()
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
