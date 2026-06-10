@@ -11,6 +11,7 @@ never stalls the pipeline or poisons the cache.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -153,10 +154,21 @@ class SalienceScorer:
         self._ttl = cache_ttl_seconds
 
     async def _invoke_llm(self, prompt: str) -> str:
-        out = self._llm(prompt)
-        if hasattr(out, "__await__"):
-            out = await out
-        return out
+        # Run the sync call off the event-loop thread so blocking LLM/embed I/O
+        # (HTTP round-trip, local-model inference, etc.) never stalls the loop.
+        # asyncio.to_thread propagates exceptions normally, so the
+        # deferred-sentinel path in score() keeps working unchanged.
+        #
+        # Await-detection (preserved from original): if the callable is async
+        # (returns a coroutine / Awaitable), skip to_thread and await directly.
+        # We detect this *without* an extra call by checking iscoroutinefunction
+        # first; for non-coroutine callables we run via to_thread.
+        import inspect
+        if inspect.iscoroutinefunction(self._llm):
+            # Async callable: await the coroutine directly.
+            return await self._llm(prompt)
+        # Sync callable: dispatch to a worker thread so the event loop stays live.
+        return await asyncio.to_thread(self._llm, prompt)
 
     async def score(
         self,
