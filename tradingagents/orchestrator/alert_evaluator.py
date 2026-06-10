@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from tradingagents.llm_clients.capabilities import get_capabilities
 from tradingagents.llm_clients.postprocess import strip_think_blocks
 
 
@@ -102,10 +103,26 @@ def evaluate_alert_candidate(
     prompt = build_alert_evaluation_prompt(event_text=event_text, tickers=tickers)
     resolved_model_id = _resolve_model_id(llm, model_id)
 
+    # Capability-gated: bind json_schema response_format only for this call
+    # when the resolved model supports grammar-constrained decoding.  The bind
+    # creates a new RunnableBinding for THIS invocation only — the caller's
+    # original ``llm`` object is never mutated, so a shared llm (e.g. the
+    # Secretary's free-text path in the promoter) remains unbound.
+    # model_id=None (no capability info) → skip bind, plain invoke.
+    # hasattr guard: plain test doubles / fake LLMs that lack .bind() are left
+    # unbound, preserving backward compatibility for existing test fixtures.
+    call_llm = llm
+    if (
+        resolved_model_id
+        and get_capabilities(resolved_model_id).supports_json_schema
+        and hasattr(llm, "bind")
+    ):
+        call_llm = llm.bind(response_format=alert_evaluation_response_format())
+
     t0 = time.monotonic()
     latency_ms: Optional[int] = None
     try:
-        resp = llm.invoke(prompt)
+        resp = call_llm.invoke(prompt)
         latency_ms = int((time.monotonic() - t0) * 1000)
         raw = strip_think_blocks(getattr(resp, "content", str(resp)))
         payload = AlertEvaluationPayload.model_validate(json.loads(raw))

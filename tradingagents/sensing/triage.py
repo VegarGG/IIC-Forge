@@ -439,8 +439,14 @@ def _main() -> None:
 
     # Build the LLM caller from the existing factory.
     from tradingagents.llm_clients.factory import create_role_llm
+    from tradingagents.sensing.salience import maybe_bind_salience_schema
     quick_client = create_role_llm("triage_salience", C)
     llm = quick_client.get_llm()
+    # Capability-gated: bind json_schema response_format only when the resolved
+    # model supports grammar-constrained decoding (local GGUF / llama.cpp).
+    # DeepSeek/MiniMax API models have supports_json_schema=False and are left
+    # unbound so they never receive an unsupported parameter.
+    llm = maybe_bind_salience_schema(llm, quick_client.model)
     def call_llm(prompt: str) -> str:
         # LangChain chat models expose .invoke for str-or-message input.
         out = llm.invoke(prompt)

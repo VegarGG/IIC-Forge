@@ -94,6 +94,29 @@ def salience_response_format() -> Dict[str, Any]:
     }
 
 
+def maybe_bind_salience_schema(llm: Any, model_id: str) -> Any:
+    """Return ``llm.bind(response_format=salience_response_format())`` when the
+    model supports json_schema; return the original ``llm`` otherwise.
+
+    This is a capability-gated helper: DeepSeek/MiniMax API models have
+    ``supports_json_schema=False`` and are left unbound.  Local GGUF models
+    (llama.cpp) have ``supports_json_schema=True`` and receive the grammar
+    constraint so invalid JSON is structurally impossible (D4 invariant).
+
+    Args:
+        llm:      A LangChain-compatible chat model (e.g. ChatOpenAI).
+        model_id: The model identifier used to look up capabilities.
+
+    Returns:
+        A ``RunnableBinding`` (from ``.bind()``) when json_schema is supported,
+        or the original ``llm`` when it is not.
+    """
+    from tradingagents.llm_clients.capabilities import get_capabilities
+    if model_id and get_capabilities(model_id).supports_json_schema and hasattr(llm, "bind"):
+        return llm.bind(response_format=salience_response_format())
+    return llm
+
+
 def _cache_key(env: Envelope) -> str:
     h = hashlib.sha256(env.text.encode("utf-8")).hexdigest()[:32]
     return f"salience:{env.source}:{h}"
