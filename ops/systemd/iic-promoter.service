@@ -16,6 +16,22 @@ Type=simple
 User=ziwei-huang
 WorkingDirectory=/home/ziwei-huang/TradingAgents/TradingAgents
 EnvironmentFile=/home/ziwei-huang/TradingAgents/TradingAgents/.env
+# ── Local LLM cutover (IIC-FORGE-05) ─────────────────────────────────────────
+# To route the alert_gate role to a local llama-server instance, add the four
+# lines below to the EnvironmentFile (.env) and reload the unit:
+#   sudo systemctl daemon-reload && sudo systemctl restart iic-promoter
+#
+# Cutover (uncomment + fill in .env, or add as Environment= lines here):
+#   LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1
+#   LOCAL_LLM_API_KEY=<bearer-token if llama-server was started with --api-key; omit otherwise>
+#   IIC_ALERT_GATE_LLM_PROVIDER=local
+#   IIC_ALERT_GATE_LLM_MODEL=<model-id matching what llama-server reports, e.g. qwen3.6-27b-q4_k_m>
+#
+# Revert: remove (or comment out) IIC_ALERT_GATE_LLM_PROVIDER — a model without a
+# provider is inert and the role falls back to the global llm_provider default.
+# LOCAL_LLM_BASE_URL and LOCAL_LLM_API_KEY are safe to leave set; they are only
+# consumed when provider=local is active.
+# ─────────────────────────────────────────────────────────────────────────────
 ExecStart=/home/ziwei-huang/miniconda3/bin/python -m tradingagents.orchestrator.promoter
 Restart=on-failure
 RestartSec=30
