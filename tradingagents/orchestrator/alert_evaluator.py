@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from tradingagents.llm_clients.postprocess import strip_think_blocks
+
 
 class AlertEvaluationPayload(BaseModel):
     decision: Literal["pass", "reject"]
@@ -105,7 +107,7 @@ def evaluate_alert_candidate(
     try:
         resp = llm.invoke(prompt)
         latency_ms = int((time.monotonic() - t0) * 1000)
-        raw = getattr(resp, "content", str(resp))
+        raw = strip_think_blocks(getattr(resp, "content", str(resp)))
         payload = AlertEvaluationPayload.model_validate(json.loads(raw))
     except (json.JSONDecodeError, ValidationError, TypeError, ValueError):
         if latency_ms is None:

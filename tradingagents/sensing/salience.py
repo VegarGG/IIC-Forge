@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Sequence
 import redis.asyncio as aioredis
 from pydantic import BaseModel, field_validator
 
+from tradingagents.llm_clients.postprocess import strip_think_blocks
+
 from .envelope import Envelope
 from .prompts import build_salience_prompt
 
@@ -110,8 +112,13 @@ def _strip_fences(blob: str) -> str:
 
 
 def _parse(blob: str) -> SalienceResult:
-    # Strip markdown code fences before parsing (API responses may wrap JSON).
-    cleaned = _strip_fences(blob.strip())
+    # Strip <think>...</think> blocks first (local GGUF belt-and-suspenders),
+    # then strip markdown code fences (API responses may wrap JSON).
+    # Order matters: think-strip must come before fence-strip in case a model
+    # emits <think>…</think>```json\n{…}\n``` — after think-strip only the
+    # fence remains for _strip_fences to handle.
+    after_think = strip_think_blocks(blob)
+    cleaned = _strip_fences(after_think)
     data = json.loads(cleaned)
     # Validate via Pydantic for strictness on the local-grammar path.
     # ValidationError (including out-of-range salience) propagates to the
