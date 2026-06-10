@@ -381,11 +381,8 @@ def _main() -> None:
     conn = connect(C["iic_db_path"])
 
     # Build the LLM caller from the existing factory.
-    from tradingagents.llm_clients.factory import create_llm_client
-    quick_client = create_llm_client(
-        provider=C["llm_provider"], model=C["quick_think_llm"],
-        base_url=C.get("backend_url"),
-    )
+    from tradingagents.llm_clients.factory import create_role_llm
+    quick_client = create_role_llm("triage_salience", C)
     llm = quick_client.get_llm()
     def call_llm(prompt: str) -> str:
         # LangChain chat models expose .invoke for str-or-message input.

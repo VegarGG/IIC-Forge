@@ -163,13 +163,10 @@ def main(config: Optional[dict] = None) -> None:
     gate_enabled = cfg["alert_approval_gate_enabled"]
     secretary = None
     if gate_enabled:
-        from tradingagents.llm_clients.factory import create_llm_client
+        from tradingagents.llm_clients.factory import create_role_llm
         from tradingagents.orchestrator.alert_evaluator import evaluate_alert_candidate
         from tradingagents.secretary.service import Secretary
-        llm = create_llm_client(
-            provider=cfg["llm_provider"], model=cfg["quick_think_llm"],
-            base_url=cfg.get("backend_url"),
-        ).get_llm()
+        llm = create_role_llm("alert_gate", cfg).get_llm()
         secretary = Secretary(conn=conn, data_dir=cfg["iic_data_dir"], llm=llm)
 
         def alert_evaluator(event_id, tickers):
