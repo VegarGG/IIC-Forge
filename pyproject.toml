@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tradingagents"
+name = "iic-forge"
 version = "0.2.5"
-description = "TradingAgents: Multi-Agents LLM Financial Trading Framework"
+description = "IIC-FORGE: local-first investment intelligence built on TradingAgents"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -64,6 +64,7 @@ dev = [
 ]
 
 [project.scripts]
+iic-forge = "cli.main:app"
 tradingagents = "cli.main:app"
 
 [tool.setuptools.packages.find]

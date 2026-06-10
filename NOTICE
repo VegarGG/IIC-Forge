@@ -1,0 +1,15 @@
+IIC-FORGE
+
+This project is derived from TradingAgents, an Apache License 2.0 project:
+
+    https://github.com/TauricResearch/TradingAgents
+
+TradingAgents citation:
+
+    Yijia Xiao, Edward Sun, Di Luo, and Wei Wang.
+    TradingAgents: Multi-Agents LLM Financial Trading Framework.
+    arXiv:2412.20138, 2025.
+    https://arxiv.org/abs/2412.20138
+
+IIC-FORGE is independently maintained and is not affiliated with or endorsed by
+the original TradingAgents authors.

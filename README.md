@@ -11,6 +11,11 @@ stock-analysis graph) in a stateful, persistent pipeline coordinated by a
 long-lived **Secretary** service. It is decision-support only — it never places
 orders.
 
+This repository is independently maintained as **IIC-FORGE**. It is derived
+from TradingAgents under the Apache License 2.0, with original notices retained
+and attribution recorded in [NOTICE](NOTICE). It is not affiliated with or
+endorsed by the original TradingAgents authors.
+
 The authoritative design is the program-level spec,
 [`docs/superpowers/specs/2026-05-25-iic-forge-program-design.md`](docs/superpowers/specs/2026-05-25-iic-forge-program-design.md);
 per-phase specs and plans live alongside it under
@@ -325,6 +330,9 @@ Tauric Research. The multi-agent analysis graph (`tradingagents/agents/`,
 `tradingagents/graph/`) is theirs; IIC-FORGE adds the sensing, orchestration,
 secretary, delivery, and operations layers around it.
 
+The source remains Apache License 2.0. Modified files in this repository reflect
+IIC-FORGE changes on top of the original TradingAgents work.
+
 ### Citation
 
 ```
@@ -341,5 +349,6 @@ secretary, delivery, and operations layers around it.
 
 ## License
 
-See [LICENSE](LICENSE). The upstream TradingAgents framework retains its own
-license terms.
+See [LICENSE](LICENSE) for Apache License 2.0 terms and [NOTICE](NOTICE) for
+project attribution. The upstream TradingAgents framework retains its original
+copyright and attribution notices.
