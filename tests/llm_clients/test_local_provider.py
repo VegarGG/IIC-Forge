@@ -57,3 +57,22 @@ def test_required_provider_still_raises_without_key(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
         create_llm_client(provider="deepseek", model="deepseek-chat").get_llm()
+
+
+# ---------------------------------------------------------------------------
+# Task 3: capability rows for candidate local classifier models
+# ---------------------------------------------------------------------------
+
+from tradingagents.llm_clients.capabilities import get_capabilities
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("model", [
+    "qwen3.6-27b-instruct-q4_k_m",
+    "deepseek-v4-flash-gguf-q4_k_m",
+])
+def test_local_model_caps(model):
+    caps = get_capabilities(model)
+    assert caps.supports_json_schema is True
+    assert caps.preferred_structured_method == "json_schema"
+    assert caps.requires_reasoning_content_roundtrip is False

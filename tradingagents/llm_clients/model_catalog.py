@@ -73,6 +73,37 @@ _MINIMAX_MODELS: Dict[str, List[ModelOption]] = {
 }
 
 
+# Candidate local GGUF models for always-on classification workloads
+# (triage salience, alert gate) served by llama-server.  These IDs are
+# descriptive / documentation — the active model is selected via config
+# (LOCAL_LLM_MODEL env var or equivalent), not by this list.  Both entries
+# support llama.cpp grammar-constrained decoding (json_schema).
+_LOCAL_MODELS: Dict[str, List[ModelOption]] = {
+    "quick": [
+        (
+            "Qwen 3.6 27B Instruct Q4_K_M - Local GGUF classifier candidate",
+            "qwen3.6-27b-instruct-q4_k_m",
+        ),
+        (
+            "DeepSeek V4 Flash GGUF Q4_K_M - Local GGUF classifier candidate",
+            "deepseek-v4-flash-gguf-q4_k_m",
+        ),
+        ("Custom model ID", "custom"),
+    ],
+    "deep": [
+        (
+            "Qwen 3.6 27B Instruct Q4_K_M - Local GGUF classifier candidate",
+            "qwen3.6-27b-instruct-q4_k_m",
+        ),
+        (
+            "DeepSeek V4 Flash GGUF Q4_K_M - Local GGUF classifier candidate",
+            "deepseek-v4-flash-gguf-q4_k_m",
+        ),
+        ("Custom model ID", "custom"),
+    ],
+}
+
+
 MODEL_OPTIONS: ProviderModeOptions = {
     "openai": {
         "quick": [
@@ -153,6 +184,9 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # so the two provider keys share one model list.
     "minimax": _MINIMAX_MODELS,
     "minimax-cn": _MINIMAX_MODELS,
+    # Local llama-server: candidate GGUF classifier models.  Any model ID is
+    # accepted (no API-key gating); these rows are descriptive for CLI menus.
+    "local": _LOCAL_MODELS,
     # OpenRouter: fetched dynamically. Azure: any deployed model name.
     # Ollama display labels intentionally omit a "local" marker — the
     # endpoint is now configurable via OLLAMA_BASE_URL, so the same labels

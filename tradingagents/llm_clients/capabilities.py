@@ -90,6 +90,17 @@ _DEFAULT = ModelCapabilities(
     preferred_structured_method="function_calling",
 )
 
+# Local llama-server (llama.cpp) models support grammar-constrained decoding
+# via the json_schema response_format extension. Neither candidate GGUF needs
+# a reasoning-content round-trip; tool_choice is unsupported by llama.cpp's
+# OpenAI-compatible endpoint.
+_LOCAL_CLASSIFIER = ModelCapabilities(
+    supports_tool_choice=False,
+    supports_json_mode=True,
+    supports_json_schema=True,
+    preferred_structured_method="json_schema",
+)
+
 
 # Exact-ID matches take precedence over pattern matches.
 _BY_ID: dict[str, ModelCapabilities] = {
@@ -97,6 +108,11 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "deepseek-reasoner": _DEEPSEEK_THINKING,
     "deepseek-v4-flash": _DEEPSEEK_THINKING,
     "deepseek-v4-pro": _DEEPSEEK_THINKING,
+    # Local GGUF classifier candidates (llama.cpp / llama-server).
+    # Exact IDs override the broader ^deepseek-v\d pattern so the GGUF
+    # variants get json_schema caps rather than the thinking-model profile.
+    "qwen3.6-27b-instruct-q4_k_m": _LOCAL_CLASSIFIER,
+    "deepseek-v4-flash-gguf-q4_k_m": _LOCAL_CLASSIFIER,
     # MiniMax — full official model lineup per
     # platform.minimax.io/docs/api-reference/text-openai-api
     "MiniMax-M2.7": _MINIMAX_THINKING,
@@ -110,10 +126,18 @@ _BY_ID: dict[str, ModelCapabilities] = {
 
 # Forward-compat patterns. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``
 # or ``MiniMax-M3*`` variants inherit the thinking-mode quirks automatically.
+# Local GGUF patterns catch future quant variants (e.g. q5_k_m, q8_0) of
+# the two candidate classifier models without requiring an exact-ID update.
 _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
     (re.compile(r"^deepseek-v\d"), _DEEPSEEK_THINKING),
     (re.compile(r"^deepseek-reasoner"), _DEEPSEEK_THINKING),
     (re.compile(r"^MiniMax-M\d"), _MINIMAX_THINKING),
+    # Local GGUF classifier candidates — match on base name prefix so any
+    # quant suffix (q4_k_m, q5_k_m, q8_0, …) is covered automatically.
+    # These sit after the broader ^deepseek-v\d rule but exact-ID entries
+    # above take priority for the two registered GGUF IDs.
+    (re.compile(r"^qwen3\.6-27b"), _LOCAL_CLASSIFIER),
+    (re.compile(r"^deepseek-v4-flash-gguf"), _LOCAL_CLASSIFIER),
 ]
 
 
