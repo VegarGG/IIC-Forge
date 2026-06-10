@@ -606,14 +606,14 @@ def insert_shadow_eval(
     *,
     event_id: str,
     model_id: str,
-    api_salience: Optional[float],
-    local_salience: Optional[float],
-    salience_delta: Optional[float],
-    api_verdict: Optional[str],
-    local_verdict: Optional[str],
     parse_ok: bool,
-    latency_ms: Optional[int],
     created_ts: str,
+    api_salience: Optional[float] = None,
+    local_salience: Optional[float] = None,
+    salience_delta: Optional[float] = None,
+    api_verdict: Optional[str] = None,
+    local_verdict: Optional[str] = None,
+    latency_ms: Optional[int] = None,
 ) -> int:
     """Insert one shadow-replay row and return its shadow_id.
 
