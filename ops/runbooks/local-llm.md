@@ -37,7 +37,7 @@ Without an API key (default for a LAN-local server):
 ```bash
 BOX=127.0.0.1
 PORT=8080
-MODEL_ID=<model-id>          # must match what llama-server reports, e.g. qwen3.6-27b-q4_k_m
+MODEL_ID=<model-id>          # must match what llama-server reports, e.g. qwen3.6-27b-instruct-q4_k_m
 
 curl -X POST http://${BOX}:${PORT}/v1/chat/completions \
      -H 'Content-Type: application/json' \
@@ -81,7 +81,7 @@ LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1
 
 # triage_salience role → local
 IIC_TRIAGE_LLM_PROVIDER=local
-IIC_TRIAGE_LLM_MODEL=<model-id>        # e.g. qwen3.6-27b-q4_k_m
+IIC_TRIAGE_LLM_MODEL=<model-id>        # e.g. qwen3.6-27b-instruct-q4_k_m
 
 # alert_gate role → local
 IIC_ALERT_GATE_LLM_PROVIDER=local

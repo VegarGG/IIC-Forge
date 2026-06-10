@@ -399,7 +399,8 @@ def test_promoter_emits_endpoint_down_alert_once(tmp_path, monkeypatch):
     transport = _RecordingTransport()
     monkeypatch.setattr(
         self_alert_mod, "build_self_alerter",
-        lambda config, **kw: self_alert_mod.SelfAlerter(transport=transport),
+        lambda config, **kw: self_alert_mod.SelfAlerter(
+            transport=transport, context=kw.get("context", "")),
     )
 
     cfg = {
@@ -436,6 +437,7 @@ def test_promoter_emits_endpoint_down_alert_once(tmp_path, monkeypatch):
     # operator channel got exactly ONE alert, identifying the failure.
     assert len(transport.messages) == 1, transport.messages
     msg = transport.messages[0]
+    # provider=local → headline must say "local LLM endpoint down"
     assert "local LLM endpoint down" in msg
     assert "promoter_llm_failures" in msg
 
@@ -459,7 +461,8 @@ def test_triage_main_wires_alert_seam_into_counter(tmp_path, monkeypatch):
     transport = _RecordingTransport()
     monkeypatch.setattr(
         self_alert_mod, "build_self_alerter",
-        lambda config, **kw: self_alert_mod.SelfAlerter(transport=transport),
+        lambda config, **kw: self_alert_mod.SelfAlerter(
+            transport=transport, context=kw.get("context", "")),
     )
     try:
         monkeypatch.setattr(redis_mod, "make_redis", lambda url: object())
@@ -513,3 +516,62 @@ def test_triage_main_wires_alert_seam_into_counter(tmp_path, monkeypatch):
         assert "triage_llm_failures" in msg
     finally:
         stub_local.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: provider-aware alert identity (truthful headline + provider= field)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_local_provider_alert_says_local_llm_endpoint_down():
+    """provider=local context → headline must be 'local LLM endpoint down'
+    and the context must include provider=local."""
+    from tradingagents.ops.self_alert import SelfAlerter
+
+    transport = _RecordingTransport()
+    alerter = SelfAlerter(
+        transport=transport,
+        context="role=triage_salience provider=local model=qwen3.6:6b endpoint=http://192.168.1.50:8080/v1",
+    )
+    counter = _alerting_counter(transport, threshold=1)
+    # Wire the alerter directly to the counter (re-create with this alerter).
+    from tradingagents.llm_clients.availability import AvailabilityCounter
+    ctr = AvailabilityCounter(
+        name="triage_llm_failures", alert_threshold=1,
+        on_threshold=alerter.endpoint_down_callback,
+    )
+    ctr.record_failure(reason="ConnectError: refused")
+
+    assert len(transport.messages) == 1
+    msg = transport.messages[0]
+    assert "local LLM endpoint down" in msg, (
+        f"Expected 'local LLM endpoint down' in message for provider=local; got: {msg!r}"
+    )
+    assert "provider=local" in msg
+
+
+@pytest.mark.unit
+def test_api_provider_alert_does_not_claim_local():
+    """provider=deepseek context → headline must NOT say 'local LLM endpoint
+    down'; it should say 'LLM endpoint down' and include provider=deepseek."""
+    from tradingagents.llm_clients.availability import AvailabilityCounter
+    from tradingagents.ops.self_alert import SelfAlerter
+
+    transport = _RecordingTransport()
+    alerter = SelfAlerter(
+        transport=transport,
+        context="role=alert_gate provider=deepseek model=deepseek-v4-flash endpoint=",
+    )
+    ctr = AvailabilityCounter(
+        name="promoter_llm_failures", alert_threshold=1,
+        on_threshold=alerter.endpoint_down_callback,
+    )
+    ctr.record_failure(reason="ConnectError: refused")
+
+    assert len(transport.messages) == 1
+    msg = transport.messages[0]
+    assert "local LLM endpoint down" not in msg, (
+        f"Alert for provider=deepseek must NOT claim 'local LLM endpoint down'; got: {msg!r}"
+    )
+    assert "LLM endpoint down" in msg
+    assert "provider=deepseek" in msg

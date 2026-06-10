@@ -24,8 +24,12 @@ from pydantic import BaseModel, field_validator
 
 from tradingagents.llm_clients.postprocess import strip_think_blocks
 
+import logging
+
 from .envelope import Envelope
 from .prompts import build_salience_prompt
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -111,9 +115,16 @@ def maybe_bind_salience_schema(llm: Any, model_id: str) -> Any:
         A ``RunnableBinding`` (from ``.bind()``) when json_schema is supported,
         or the original ``llm`` when it is not.
     """
-    from tradingagents.llm_clients.capabilities import get_capabilities
-    if model_id and get_capabilities(model_id).supports_json_schema and hasattr(llm, "bind"):
+    from tradingagents.llm_clients.capabilities import get_capabilities, is_default_caps
+    caps = get_capabilities(model_id) if model_id else None
+    if caps is not None and caps.supports_json_schema and hasattr(llm, "bind"):
         return llm.bind(response_format=salience_response_format())
+    if model_id and caps is not None and is_default_caps(caps):
+        log.warning(
+            "json_schema binding skipped for model %s (no capability row) "
+            "— local grammar enforcement inactive",
+            model_id,
+        )
     return llm
 
 
@@ -219,9 +230,19 @@ class SalienceScorer:
         key = _cache_key(env)
         cached = await self._redis.get(key)
         if cached:
-            result = _parse(cached)
-            result.source = "cache"
-            return result
+            try:
+                result = _parse(cached)
+                result.source = "cache"
+                return result
+            except Exception as _cache_err:
+                # Legacy blob from a prior branch/version (e.g. out-of-range
+                # salience=7.5 cached before the bounds validator was tightened)
+                # must not dead-letter the event.  Treat as a cache MISS and
+                # fall through to live LLM scoring so the event is processed.
+                log.debug(
+                    "cache parse failed for key %s (%s: %s) — treating as miss",
+                    key, type(_cache_err).__name__, _cache_err,
+                )
 
         prompt = build_salience_prompt(env=env, watchlist=watchlist,
                                        macro_context=macro_context)

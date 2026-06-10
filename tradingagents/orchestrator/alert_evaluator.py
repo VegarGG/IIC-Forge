@@ -9,8 +9,12 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from tradingagents.llm_clients.capabilities import get_capabilities
+import logging
+
+from tradingagents.llm_clients.capabilities import get_capabilities, is_default_caps
 from tradingagents.llm_clients.postprocess import strip_think_blocks
+
+log = logging.getLogger(__name__)
 
 
 class AlertEvaluationPayload(BaseModel):
@@ -117,12 +121,16 @@ def evaluate_alert_candidate(
     # hasattr guard: plain test doubles / fake LLMs that lack .bind() are left
     # unbound, preserving backward compatibility for existing test fixtures.
     call_llm = llm
-    if (
-        resolved_model_id
-        and get_capabilities(resolved_model_id).supports_json_schema
-        and hasattr(llm, "bind")
-    ):
-        call_llm = llm.bind(response_format=alert_evaluation_response_format())
+    if resolved_model_id:
+        _caps = get_capabilities(resolved_model_id)
+        if _caps.supports_json_schema and hasattr(llm, "bind"):
+            call_llm = llm.bind(response_format=alert_evaluation_response_format())
+        elif is_default_caps(_caps):
+            log.warning(
+                "json_schema binding skipped for model %s (no capability row) "
+                "— local grammar enforcement inactive",
+                resolved_model_id,
+            )
 
     t0 = time.monotonic()
     latency_ms: Optional[int] = None

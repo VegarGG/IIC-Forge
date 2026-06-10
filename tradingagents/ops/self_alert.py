@@ -96,9 +96,21 @@ class SelfAlerter:
         The counter fields are read unlocked — under a concurrent burst they
         may have advanced past the crossing values, which is benign (the
         message is a snapshot for a human).
+
+        The headline is provider-aware: "local LLM endpoint down" when the
+        context contains ``provider=local``; "LLM endpoint down" otherwise.
+        The full context (provider, model, endpoint) is always included.
         """
+        # Derive provider from the context string so the headline is truthful.
+        import re as _re
+        _m = _re.search(r"provider=(\S+)", self._context)
+        _provider = _m.group(1).lower() if _m else ""
+        if _provider == "local":
+            headline = "local LLM endpoint down"
+        else:
+            headline = "LLM endpoint down"
         self.notify(
-            f"local LLM endpoint down: counter={counter.name} "
+            f"{headline}: counter={counter.name} "
             f"consecutive={counter.consecutive} total={counter.total} "
             f"last_failure_ts={counter.last_failure_ts} "
             f"last_reason={counter.last_reason}"

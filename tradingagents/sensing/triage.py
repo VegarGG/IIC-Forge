@@ -583,9 +583,10 @@ def _main() -> None:
     # NON-BLOCKING: when called from a running event-loop thread, a daemon
     # thread is spawned so the loop is never stalled (see self_alert.py).
     from tradingagents.ops import self_alert
+    _alert_provider = (role_cfg.get("provider") or C.get("llm_provider") or "").lower()
     _alert_base_url = getattr(quick_client, "base_url", None) or ""
     _alert_context = (
-        f"role=triage_salience provider=local "
+        f"role=triage_salience provider={_alert_provider} "
         f"model={quick_client.model} endpoint={_alert_base_url}"
     )
     alerter = self_alert.build_self_alerter(C, context=_alert_context)

@@ -410,3 +410,50 @@ def test_unknown_model_id_no_bind_wire(stub_openai_server, monkeypatch):
         f"Unknown model 'totally-unknown-model-xyz' must NOT receive "
         f"response_format=json_schema (fail-closed); got keys: {list(body.keys())}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: loud-skip warning when model has no capability row (_DEFAULT caps)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_unknown_model_id_logs_warning_in_maybe_bind(caplog):
+    """maybe_bind_salience_schema must emit a WARNING when the model_id maps to
+    the _DEFAULT caps object (no capability row), so the operator knows that
+    json_schema grammar enforcement is silently inactive."""
+    import logging
+    from tradingagents.sensing.salience import maybe_bind_salience_schema
+
+    class _FakeLLM:
+        def invoke(self, prompt):
+            pass
+
+    with caplog.at_level(logging.WARNING, logger="tradingagents.sensing.salience"):
+        maybe_bind_salience_schema(_FakeLLM(), "totally-unknown-model-for-warn-test")
+
+    assert any(
+        "totally-unknown-model-for-warn-test" in r.message
+        and "no capability row" in r.message
+        for r in caplog.records
+    ), f"Expected json_schema-skip warning for unknown model; caplog: {caplog.text!r}"
+
+
+@pytest.mark.unit
+def test_known_api_model_no_warning_in_maybe_bind(caplog):
+    """deepseek-v4-flash has a known capability row (supports_json_schema=False)
+    — maybe_bind_salience_schema must NOT log a warning for it."""
+    import logging
+    from tradingagents.sensing.salience import maybe_bind_salience_schema
+
+    class _FakeLLM:
+        def invoke(self, prompt):
+            pass
+
+    with caplog.at_level(logging.WARNING, logger="tradingagents.sensing.salience"):
+        maybe_bind_salience_schema(_FakeLLM(), "deepseek-v4-flash")
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any("deepseek-v4-flash" in m for m in warning_msgs), (
+        f"deepseek-v4-flash has a known row — no json_schema-skip warning expected; "
+        f"got: {warning_msgs}"
+    )

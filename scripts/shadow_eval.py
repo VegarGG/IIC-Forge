@@ -397,12 +397,15 @@ def build_local_config(
 
 def score_salience_once(
     llm: Any, *, env: Any, watchlist: Sequence[str]
-) -> Tuple[Optional[float], bool, int]:
+) -> Tuple[Optional[float], bool, Optional[int]]:
     """One salience call: build_salience_prompt -> invoke -> salience._parse.
 
-    Returns (salience | None, parse_ok, latency_ms).  ``_parse`` is the
-    salience module's own parser (strip_think_blocks -> fence-strip ->
-    SalienceSchema validation) so no parsing logic is duplicated here.
+    Returns (salience | None, parse_ok, latency_ms | None).  On failure
+    ``latency_ms`` is ``None`` so that p50/p95 stats are not skewed downward
+    by failed calls (``compute_report`` already filters non-None latencies).
+    ``_parse`` is the salience module's own parser (strip_think_blocks ->
+    fence-strip -> SalienceSchema validation) so no parsing logic is
+    duplicated here.
     """
     from tradingagents.sensing.prompts import build_salience_prompt
     from tradingagents.sensing.salience import _parse as parse_salience
@@ -416,7 +419,7 @@ def score_salience_once(
         result = parse_salience(getattr(resp, "content", str(resp)))
         return result.salience, True, latency_ms
     except Exception:
-        return None, False, int((time.monotonic() - t0) * 1000)
+        return None, False, None
 
 
 def replay(
@@ -512,7 +515,7 @@ def replay(
         api_verdict: Optional[str] = None
         local_verdict: Optional[str] = None
         gate_parse_ok: bool = True
-        gate_lat: int = 0
+        gate_lat: Optional[int] = None
 
         if promotable:
             # Wrap each gate call independently so a network/parse failure on
@@ -543,7 +546,8 @@ def replay(
                 )
                 local_verdict = "pass" if loc_eval.passed else "reject"
                 gate_parse_ok = gate_parse_ok and bool(loc_eval.parse_ok)
-                gate_lat = loc_eval.latency_ms or 0
+                # None on parse/validation failure: don't skew p50/p95 downward.
+                gate_lat = loc_eval.latency_ms if loc_eval.parse_ok else None
             except Exception as exc:
                 print(
                     f"[shadow_eval] gate local-side error for {ev['event_id']}: "

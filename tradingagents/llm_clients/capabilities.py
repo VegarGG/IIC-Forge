@@ -160,3 +160,15 @@ def get_capabilities(model_name: str) -> ModelCapabilities:
         if pattern.match(model_name):
             return caps
     return _DEFAULT
+
+
+def is_default_caps(caps: ModelCapabilities) -> bool:
+    """Return True when ``caps`` is the ``_DEFAULT`` sentinel object.
+
+    Use this to detect models that had no explicit capability row — the caller
+    can warn the operator that json_schema binding is silently inactive.
+    Identity comparison is safe because ``_DEFAULT`` is a module-level
+    singleton (frozen dataclass); every unknown model resolves to the exact
+    same object.
+    """
+    return caps is _DEFAULT
