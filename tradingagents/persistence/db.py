@@ -38,6 +38,8 @@ _EXPECTED_TABLES: Set[str] = {
     "queue_jobs", "deliveries",
     # F3:
     "ingest_cursor", "tickers", "event_fingerprints", "event_embeddings",
+    # F4/Task 10/Task 13/Task 15:
+    "alert_evaluations", "analysis_packs", "shadow_eval", "ops_counters",
 }
 
 

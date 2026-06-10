@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -86,10 +86,15 @@ def build_alert_evaluation_prompt(*, event_text: str, tickers: list[str]) -> str
 
 
 def _resolve_model_id(llm: Any, model_id: Optional[str]) -> Optional[str]:
-    """Resolve model identity: explicit kwarg > llm.model_name > None."""
+    """Resolve model identity: explicit kwarg > llm.model_name > llm.model > None.
+
+    ``model_name`` is the ChatOpenAI/ChatDeepSeek convention; ``model`` is used
+    by ChatAnthropic and ChatGoogleGenerativeAI.  Trying both ensures capability
+    lookup works regardless of provider.
+    """
     if model_id is not None:
         return model_id
-    return getattr(llm, "model_name", None)
+    return getattr(llm, "model_name", None) or getattr(llm, "model", None)
 
 
 def evaluate_alert_candidate(

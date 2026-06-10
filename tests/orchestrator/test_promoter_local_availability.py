@@ -44,10 +44,9 @@ def _kill_server(stub: StubOpenAIServer) -> None:
     """Fully stop a stub mid-test: stop the accept loop AND close the
     listening socket.  ``shutdown()`` alone leaves the bound socket accepting
     TCP handshakes whose requests then hang (no accept loop to serve them);
-    ``server_close()`` makes subsequent connections be REFUSED immediately,
+    ``close()`` makes subsequent connections be REFUSED immediately,
     which is the 'endpoint died' condition the runtime tests simulate."""
-    stub.shutdown()
-    stub._server.server_close()
+    stub.close()
 
 
 def _now() -> str:

@@ -14,7 +14,6 @@ from types import SimpleNamespace
 import pytest
 
 from tradingagents.orchestrator.alert_evaluator import (
-    AlertEvaluationPayload,
     alert_evaluation_response_format,
     evaluate_alert_candidate,
 )
@@ -297,10 +296,6 @@ class TestFetchAlertEvalTelemetry:
 
 
 # ---------------------------------------------------------------------------
-# alert_evaluation_response_format helper
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # Issue 2: invoke-raise exception contract — llm.invoke raising ValueError/TypeError
 # must return the reject sentinel, NOT propagate the exception
 # ---------------------------------------------------------------------------
@@ -350,19 +345,10 @@ class TestEvaluateAlertCandidateInvokeRaises:
         assert isinstance(result.latency_ms, int)
         assert result.latency_ms >= 0
 
-    def test_invoke_raises_does_not_propagate(self):
-        """Ensure no exception leaks out of evaluate_alert_candidate."""
-        llm = self._make_error_llm(ValueError("boom"))
-        try:
-            result = evaluate_alert_candidate(
-                llm=llm,
-                event_text="some text",
-                tickers=["TSLA"],
-                min_score=0.80,
-            )
-        except (ValueError, TypeError) as e:
-            pytest.fail(f"evaluate_alert_candidate propagated exception: {e}")
 
+# ---------------------------------------------------------------------------
+# alert_evaluation_response_format helper
+# ---------------------------------------------------------------------------
 
 class TestAlertEvaluationResponseFormat:
     def test_returns_dict_with_json_schema_type(self):

@@ -334,22 +334,15 @@ def fetch_alert_eval_telemetry(
     (insertion order) — stable for per-model parse-failure rate and latency
     distribution queries (Task 14/16 consumers).
     """
-    if model_id is not None:
-        rows = conn.execute(
-            "SELECT evaluation_id, event_id, decision, score, "
-            "model_id, parse_ok, latency_ms, created_ts "
-            "FROM alert_evaluations "
-            "WHERE model_id = ? "
-            "ORDER BY evaluation_id",
-            (model_id,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT evaluation_id, event_id, decision, score, "
-            "model_id, parse_ok, latency_ms, created_ts "
-            "FROM alert_evaluations "
-            "ORDER BY evaluation_id"
-        ).fetchall()
+    where = "WHERE model_id = ? " if model_id is not None else ""
+    params: tuple = (model_id,) if model_id is not None else ()
+    rows = conn.execute(
+        "SELECT evaluation_id, event_id, decision, score, "
+        "model_id, parse_ok, latency_ms, created_ts "
+        f"FROM alert_evaluations {where}"
+        "ORDER BY evaluation_id",
+        params,
+    ).fetchall()
     return [dict(r) for r in rows]
 
 

@@ -139,9 +139,11 @@ _BY_ID: dict[str, ModelCapabilities] = {
 # automatically via the broader patterns further down the list.
 _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
     # More-specific local GGUF patterns first — must precede the broader
-    # ^deepseek-v\d and ^qwen rules so quant suffixes get _LOCAL_CLASSIFIER.
+    # ^deepseek-v\d patterns so quant suffixes get _LOCAL_CLASSIFIER.
+    # ^qwen3\.6-27b-instruct matches all quant variants (e.g. -q4_k_m, -q8_0)
+    # while staying narrower than a hypothetical hosted qwen3.6-27b API model.
     (re.compile(r"^deepseek-v4-flash-gguf"), _LOCAL_CLASSIFIER),
-    (re.compile(r"^qwen3\.6-27b"), _LOCAL_CLASSIFIER),
+    (re.compile(r"^qwen3\.6-27b-instruct"), _LOCAL_CLASSIFIER),
     # Broader API-model patterns follow; these only fire when no specific
     # GGUF prefix matched above.
     (re.compile(r"^deepseek-v\d"), _DEEPSEEK_THINKING),

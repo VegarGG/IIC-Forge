@@ -47,7 +47,7 @@ def _make_cfg(base_url: str) -> dict:
 
 
 @pytest.mark.unit
-def test_local_request_disables_thinking_and_uses_json_schema(
+def test_local_request_disables_thinking(
     stub_openai_server, monkeypatch
 ):
     """The local role must send enable_thinking=False in the request body.

@@ -78,6 +78,8 @@ _MINIMAX_MODELS: Dict[str, List[ModelOption]] = {
 # descriptive / documentation — the active model is selected via config
 # (LOCAL_LLM_MODEL env var or equivalent), not by this list.  Both entries
 # support llama.cpp grammar-constrained decoding (json_schema).
+# NOTE: quick/deep distinction is meaningless for a local single-model server;
+# both lists are identical so every menu path offers the same candidates.
 _LOCAL_MODELS: Dict[str, List[ModelOption]] = {
     "quick": [
         (

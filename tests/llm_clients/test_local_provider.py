@@ -1,4 +1,5 @@
 import pytest
+from tradingagents.llm_clients.capabilities import get_capabilities
 from tradingagents.llm_clients.factory import create_llm_client, _OPENAI_COMPATIBLE
 from tradingagents.llm_clients.openai_client import _resolve_provider_base_url
 from tradingagents.llm_clients.api_key_env import is_optional_key
@@ -63,8 +64,6 @@ def test_required_provider_still_raises_without_key(monkeypatch):
 # Task 3: capability rows for candidate local classifier models
 # ---------------------------------------------------------------------------
 
-from tradingagents.llm_clients.capabilities import get_capabilities
-
 
 @pytest.mark.unit
 @pytest.mark.parametrize("model", [
@@ -93,7 +92,7 @@ def test_unregistered_gguf_quant_variants_get_local_classifier_caps(model):
     """Unregistered quant suffixes must resolve to _LOCAL_CLASSIFIER, not _DEEPSEEK_THINKING."""
     caps = get_capabilities(model)
     assert caps.supports_json_schema is True, (
-        f"{model}: expected supports_json_schema=True (got _LOCAL_CLASSIFIER), "
+        f"{model}: expected _LOCAL_CLASSIFIER caps (supports_json_schema=True), "
         "got False (silently matched _DEEPSEEK_THINKING)"
     )
     assert caps.preferred_structured_method == "json_schema", (

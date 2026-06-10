@@ -355,7 +355,7 @@ CREATE TABLE IF NOT EXISTS shadow_eval (
     salience_delta  REAL,                           -- local − api; NULL when salience not exercised
     api_verdict     TEXT,                           -- 'pass'/'reject'; NULL for triage-only rows
     local_verdict   TEXT,                           -- 'pass'/'reject'; NULL for triage-only rows
-    parse_ok        INTEGER NOT NULL DEFAULT 1,     -- 1 = local parse succeeded; 0 = failed
+    parse_ok        INTEGER NOT NULL,               -- 1 = local parse succeeded; 0 = failed
     latency_ms      INTEGER,                        -- local model wall-clock latency (ms)
     created_ts      TEXT    NOT NULL                -- UTC ISO-8601 string
 );

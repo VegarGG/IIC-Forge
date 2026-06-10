@@ -20,6 +20,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Canned response helper
@@ -128,12 +130,18 @@ class StubOpenAIServer:
         self._server.shutdown()
         self._thread.join(timeout=5)
 
+    def close(self) -> None:
+        """Fully stop the server: stop the accept loop, join the thread, and
+        release the listening socket.  Use this when you need the port to be
+        *refused* (not just no-longer-served) after teardown — e.g. to
+        simulate an endpoint that has gone away mid-test."""
+        self.shutdown()
+        self._server.server_close()
+
 
 # ---------------------------------------------------------------------------
 # pytest fixture
 # ---------------------------------------------------------------------------
-
-import pytest  # noqa: E402 (after stdlib imports for clarity)
 
 
 @pytest.fixture()
@@ -141,4 +149,4 @@ def stub_openai_server():
     """Yield a running StubOpenAIServer; shut it down on teardown."""
     server = StubOpenAIServer()
     yield server
-    server.shutdown()
+    server.close()
