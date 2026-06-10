@@ -63,4 +63,11 @@ async def test_salience_handles_malformed_llm_json():
     result = await s.score(env=_env(), watchlist=[], macro_context="")
     assert 0.0 <= result.salience <= 0.3
     assert result.mentioned_tickers == []
-    assert "fallback" in result.reason.lower() or "parse" in result.reason.lower()
+    # Task 9: failure path now returns source="deferred"; reason carries the
+    # error type.  Accept both the old "fallback"/"parse" wording and the new
+    # "deferred" wording so the test is forward-compatible.
+    assert (
+        "fallback" in result.reason.lower()
+        or "parse" in result.reason.lower()
+        or "deferred" in result.reason.lower()
+    )

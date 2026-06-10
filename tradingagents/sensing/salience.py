@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
-from typing import List, Sequence
+from typing import Any, Dict, List, Sequence
 
 import redis.asyncio as aioredis
+from pydantic import BaseModel
 
 from .envelope import Envelope
 from .prompts import build_salience_prompt
@@ -33,7 +35,47 @@ class SalienceResult:
     matched_tickers: List[str] = field(default_factory=list)
     mentioned_tickers: List[MentionedTicker] = field(default_factory=list)
     reason: str = ""
-    source: str = "llm"  # "llm" | "cache" | "fallback"
+    source: str = "llm"  # "llm" | "cache" | "fallback" | "deferred"
+
+
+class _MentionedTickerSchema(BaseModel):
+    ticker: str
+    confidence: float
+
+
+class SalienceSchema(BaseModel):
+    """Pydantic schema mirroring the parseable fields of SalienceResult.
+
+    Use ``salience_response_format()`` to build the ``response_format`` dict
+    for json_schema-mode LLM calls (Task 14 wiring point).
+    """
+    salience: float
+    matched_tickers: List[str] = []
+    mentioned_tickers: List[_MentionedTickerSchema] = []
+    reason: str = ""
+
+
+def salience_response_format() -> Dict[str, Any]:
+    """Return a ``response_format`` dict for json_schema-mode LLM calls.
+
+    Usage (call-site, e.g. Task 14 harness)::
+
+        fmt = salience_response_format()
+        response = llm.invoke(prompt, response_format=fmt)
+
+    The scorer itself does not attach this to its ``llm_call`` closure today
+    because the closure is a plain ``lambda prompt: llm.invoke(prompt)``
+    (see triage._main).  Wiring response_format into the actual request is
+    deferred to Task 14 which can update the closure signature.
+    """
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "SalienceResult",
+            "schema": SalienceSchema.model_json_schema(),
+            "strict": False,
+        },
+    }
 
 
 def _cache_key(env: Envelope) -> str:
@@ -41,16 +83,31 @@ def _cache_key(env: Envelope) -> str:
     return f"salience:{env.source}:{h}"
 
 
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def _strip_fences(blob: str) -> str:
+    """Strip ```json ... ``` or ``` ... ``` fences if present (API path tolerance)."""
+    m = _FENCE_RE.search(blob)
+    if m:
+        return m.group(1)
+    return blob
+
+
 def _parse(blob: str) -> SalienceResult:
-    data = json.loads(blob)
+    # Strip markdown code fences before parsing (API responses may wrap JSON).
+    cleaned = _strip_fences(blob.strip())
+    data = json.loads(cleaned)
+    # Validate via Pydantic for strictness on the local-grammar path.
+    validated = SalienceSchema.model_validate(data)
     return SalienceResult(
-        salience=float(data["salience"]),
-        matched_tickers=list(data.get("matched_tickers", [])),
+        salience=validated.salience,
+        matched_tickers=list(validated.matched_tickers),
         mentioned_tickers=[
-            MentionedTicker(ticker=m["ticker"], confidence=float(m["confidence"]))
-            for m in data.get("mentioned_tickers", [])
+            MentionedTicker(ticker=m.ticker, confidence=m.confidence)
+            for m in validated.mentioned_tickers
         ],
-        reason=str(data.get("reason", "")),
+        reason=validated.reason,
     )
 
 
@@ -107,11 +164,14 @@ class SalienceScorer:
             result = _parse(raw)
             result.source = "llm"
         except Exception as e:
-            # Don't stall the pipeline — degrade to a fallback that flows through.
-            result = SalienceResult(
-                salience=0.1, matched_tickers=[], mentioned_tickers=[],
-                reason=f"parse-fallback: {type(e).__name__}",
-                source="fallback",
+            # Don't stall the pipeline — return a deferred sentinel.
+            # DO NOT cache the failure: a transient LLM error should not
+            # poison the cache with a low-salience placeholder for 24h.
+            # (Task 15 will add full deferred-queue handling.)
+            return SalienceResult(
+                salience=0.0, matched_tickers=[], mentioned_tickers=[],
+                reason=f"deferred: {type(e).__name__}",
+                source="deferred",
             )
 
         await self._redis.setex(key, self._ttl, _serialize(result))
