@@ -65,14 +65,29 @@ def test_salience_schema_is_valid_json_schema():
 
 @pytest.mark.unit
 def test_salience_response_format_helper():
-    """salience_response_format() returns the json_schema response_format dict."""
+    """salience_response_format() returns the json_schema response_format dict with real pins."""
     from tradingagents.sensing.salience import salience_response_format
     fmt = salience_response_format()
     assert fmt["type"] == "json_schema"
-    assert "json_schema" in fmt
-    # Must be consumable (valid dict, not raising)
     inner = fmt["json_schema"]
-    assert "schema" in inner or "name" in inner or len(inner) > 0
+    assert inner["name"] == "SalienceResult"
+    assert "schema" in inner
+    assert inner["schema"]["type"] == "object"
+    assert "salience" in inner["schema"]["properties"]
+
+
+@pytest.mark.unit
+def test_salience_response_format_no_bounds_in_schema():
+    """salience_response_format() must NOT emit minimum/maximum for salience.
+
+    llama.cpp's GBNF converter has incomplete numeric-bound support; bounds are
+    enforced by the field_validator instead of Field(ge=..., le=...).
+    """
+    from tradingagents.sensing.salience import salience_response_format
+    fmt = salience_response_format()
+    salience_prop = fmt["json_schema"]["schema"]["properties"]["salience"]
+    assert "minimum" not in salience_prop
+    assert "maximum" not in salience_prop
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +95,7 @@ def test_salience_response_format_helper():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
-async def test_failure_does_not_cache(fake_redis, monkeypatch):
+async def test_failure_does_not_cache(fake_redis):
     """LLM raises -> result is 'deferred', and NOTHING is written to redis."""
     scorer = SalienceScorer(redis=fake_redis, llm_call=_raise, cache_ttl_seconds=86400)
     result = await scorer.score(env=_env(), watchlist=["NVDA"], macro_context="")
@@ -94,6 +109,38 @@ async def test_parse_failure_does_not_cache(fake_redis):
     scorer = SalienceScorer(
         redis=fake_redis,
         llm_call=lambda _: "not valid json at all",
+        cache_ttl_seconds=86400,
+    )
+    result = await scorer.score(env=_env(), watchlist=[], macro_context="")
+    assert result.source == "deferred"
+    assert fake_redis.setex_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Out-of-range salience must be deferred (not cached)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+async def test_out_of_range_salience_high_is_deferred(fake_redis):
+    """salience=7.5 from LLM must produce source='deferred' with zero setex calls."""
+    bad_payload = json.dumps({"salience": 7.5, "matched_tickers": [], "reason": "bad"})
+    scorer = SalienceScorer(
+        redis=fake_redis,
+        llm_call=lambda _: bad_payload,
+        cache_ttl_seconds=86400,
+    )
+    result = await scorer.score(env=_env(), watchlist=[], macro_context="")
+    assert result.source == "deferred"
+    assert fake_redis.setex_calls == 0
+
+
+@pytest.mark.unit
+async def test_out_of_range_salience_negative_is_deferred(fake_redis):
+    """salience=-0.2 from LLM must produce source='deferred' with zero setex calls."""
+    bad_payload = json.dumps({"salience": -0.2, "matched_tickers": [], "reason": "bad"})
+    scorer = SalienceScorer(
+        redis=fake_redis,
+        llm_call=lambda _: bad_payload,
         cache_ttl_seconds=86400,
     )
     result = await scorer.score(env=_env(), watchlist=[], macro_context="")
@@ -126,7 +173,7 @@ async def test_success_still_caches(fake_redis):
 
 
 # ---------------------------------------------------------------------------
-# Fence-tolerant _parse: ```json ... ``` wrapping must be handled
+# Fence-tolerant _parse: ```json ... ``` and ```JSON ... ``` wrapping
 # ---------------------------------------------------------------------------
 
 @pytest.mark.unit
@@ -140,6 +187,20 @@ async def test_fence_tolerant_parse(fake_redis):
     )
     result = await scorer.score(env=_env(), watchlist=["TSLA"], macro_context="")
     assert result.salience == pytest.approx(0.7)
+    assert result.source == "llm"
+
+
+@pytest.mark.unit
+async def test_fence_tolerant_parse_uppercase_json_tag(fake_redis):
+    """LLM wrapping valid JSON in ```JSON...``` (uppercase) fences must be parsed correctly."""
+    fenced = '```JSON\n{"salience": 0.6, "matched_tickers": [], "mentioned_tickers": [], "reason": "macro"}\n```'
+    scorer = SalienceScorer(
+        redis=fake_redis,
+        llm_call=lambda _: fenced,
+        cache_ttl_seconds=86400,
+    )
+    result = await scorer.score(env=_env(), watchlist=[], macro_context="")
+    assert result.salience == pytest.approx(0.6)
     assert result.source == "llm"
 
 

@@ -4,8 +4,9 @@ The cache key is ``salience:<source>:<sha256(text)[:32]>`` so identical text
 across sources still hits separately (different prompts), but re-deliveries
 of the exact same source+text envelope are free.
 
-LLM responses are parsed leniently — malformed JSON degrades to a
-low-confidence fallback so a flaky model never stalls the pipeline.
+LLM responses are parsed strictly via Pydantic; malformed or out-of-range
+responses return a deferred sentinel that is NOT cached, so a flaky model
+never stalls the pipeline or poisons the cache.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Sequence
 
 import redis.asyncio as aioredis
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from .envelope import Envelope
 from .prompts import build_salience_prompt
@@ -35,7 +36,7 @@ class SalienceResult:
     matched_tickers: List[str] = field(default_factory=list)
     mentioned_tickers: List[MentionedTicker] = field(default_factory=list)
     reason: str = ""
-    source: str = "llm"  # "llm" | "cache" | "fallback" | "deferred"
+    source: str = "llm"  # "llm" | "cache" | "deferred"
 
 
 class _MentionedTickerSchema(BaseModel):
@@ -53,6 +54,17 @@ class SalienceSchema(BaseModel):
     matched_tickers: List[str] = []
     mentioned_tickers: List[_MentionedTickerSchema] = []
     reason: str = ""
+
+    # Bounds are enforced here via a field_validator rather than
+    # Field(ge=0.0, le=1.0) because the latter injects ``minimum``/``maximum``
+    # into model_json_schema() output.  llama.cpp's GBNF converter has
+    # incomplete numeric-bound support and chokes on those keys.
+    @field_validator("salience")
+    @classmethod
+    def salience_in_range(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"salience must be in [0.0, 1.0], got {v!r}")
+        return v
 
 
 def salience_response_format() -> Dict[str, Any]:
@@ -83,7 +95,8 @@ def _cache_key(env: Envelope) -> str:
     return f"salience:{env.source}:{h}"
 
 
-_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+# re.IGNORECASE so ```JSON (uppercase) fences are handled the same as ```json.
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 
 def _strip_fences(blob: str) -> str:
@@ -99,6 +112,8 @@ def _parse(blob: str) -> SalienceResult:
     cleaned = _strip_fences(blob.strip())
     data = json.loads(cleaned)
     # Validate via Pydantic for strictness on the local-grammar path.
+    # ValidationError (including out-of-range salience) propagates to the
+    # caller which returns a deferred sentinel without caching.
     validated = SalienceSchema.model_validate(data)
     return SalienceResult(
         salience=validated.salience,
@@ -165,8 +180,10 @@ class SalienceScorer:
             result.source = "llm"
         except Exception as e:
             # Don't stall the pipeline — return a deferred sentinel.
-            # DO NOT cache the failure: a transient LLM error should not
-            # poison the cache with a low-salience placeholder for 24h.
+            # DO NOT cache the failure: a transient LLM error or out-of-range
+            # salience should not poison the cache for 24h.
+            # salience=0.0 guarantees a deferred event can never cross the
+            # promote threshold (old fallback was 0.1).
             # (Task 15 will add full deferred-queue handling.)
             return SalienceResult(
                 salience=0.0, matched_tickers=[], mentioned_tickers=[],
