@@ -124,20 +124,24 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "MiniMax-M2": _MINIMAX_THINKING,
 }
 
-# Forward-compat patterns. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``
-# or ``MiniMax-M3*`` variants inherit the thinking-mode quirks automatically.
-# Local GGUF patterns catch future quant variants (e.g. q5_k_m, q8_0) of
-# the two candidate classifier models without requiring an exact-ID update.
+# Forward-compat patterns. First match wins, so more-specific patterns must
+# come before broader ones. Local GGUF prefixes (e.g. ``^deepseek-v4-flash-gguf``)
+# must precede the broad API-model patterns (e.g. ``^deepseek-v\d``) so that
+# future quant variants like ``deepseek-v4-flash-gguf-q5_k_m`` resolve to
+# ``_LOCAL_CLASSIFIER`` rather than silently falling through to
+# ``_DEEPSEEK_THINKING``. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``
+# or ``MiniMax-M3*`` variants still inherit the thinking-mode quirks
+# automatically via the broader patterns further down the list.
 _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
+    # More-specific local GGUF patterns first — must precede the broader
+    # ^deepseek-v\d and ^qwen rules so quant suffixes get _LOCAL_CLASSIFIER.
+    (re.compile(r"^deepseek-v4-flash-gguf"), _LOCAL_CLASSIFIER),
+    (re.compile(r"^qwen3\.6-27b"), _LOCAL_CLASSIFIER),
+    # Broader API-model patterns follow; these only fire when no specific
+    # GGUF prefix matched above.
     (re.compile(r"^deepseek-v\d"), _DEEPSEEK_THINKING),
     (re.compile(r"^deepseek-reasoner"), _DEEPSEEK_THINKING),
     (re.compile(r"^MiniMax-M\d"), _MINIMAX_THINKING),
-    # Local GGUF classifier candidates — match on base name prefix so any
-    # quant suffix (q4_k_m, q5_k_m, q8_0, …) is covered automatically.
-    # These sit after the broader ^deepseek-v\d rule but exact-ID entries
-    # above take priority for the two registered GGUF IDs.
-    (re.compile(r"^qwen3\.6-27b"), _LOCAL_CLASSIFIER),
-    (re.compile(r"^deepseek-v4-flash-gguf"), _LOCAL_CLASSIFIER),
 ]
 
 

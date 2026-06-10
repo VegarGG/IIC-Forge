@@ -76,3 +76,29 @@ def test_local_model_caps(model):
     assert caps.supports_json_schema is True
     assert caps.preferred_structured_method == "json_schema"
     assert caps.requires_reasoning_content_roundtrip is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: forward-compat GGUF quant variants must match _LOCAL_CLASSIFIER,
+# not the broader ^deepseek-v\d thinking-model pattern.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("model", [
+    "deepseek-v4-flash-gguf-q5_k_m",
+    "qwen3.6-27b-instruct-q8_0",
+])
+def test_unregistered_gguf_quant_variants_get_local_classifier_caps(model):
+    """Unregistered quant suffixes must resolve to _LOCAL_CLASSIFIER, not _DEEPSEEK_THINKING."""
+    caps = get_capabilities(model)
+    assert caps.supports_json_schema is True, (
+        f"{model}: expected supports_json_schema=True (got _LOCAL_CLASSIFIER), "
+        "got False (silently matched _DEEPSEEK_THINKING)"
+    )
+    assert caps.preferred_structured_method == "json_schema", (
+        f"{model}: expected preferred_structured_method='json_schema', got {caps.preferred_structured_method!r}"
+    )
+    assert caps.requires_reasoning_content_roundtrip is False, (
+        f"{model}: expected requires_reasoning_content_roundtrip=False, got True"
+    )
