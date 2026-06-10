@@ -285,11 +285,15 @@ def insert_alert_evaluation(
     score: float,
     payload: dict,
     created_ts: str,
+    model_id: Optional[str] = None,
+    parse_ok: Optional[bool] = None,
+    latency_ms: Optional[int] = None,
 ) -> int:
     cur = conn.execute(
         "INSERT INTO alert_evaluations "
-        "(event_id, tickers, decision, score, payload, created_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(event_id, tickers, decision, score, payload, created_ts, "
+        "model_id, parse_ok, latency_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             event_id,
             json.dumps(tickers),
@@ -297,10 +301,47 @@ def insert_alert_evaluation(
             score,
             json.dumps(payload),
             created_ts,
+            model_id,
+            # SQLite stores booleans as integers; None stays NULL
+            (1 if parse_ok else 0) if parse_ok is not None else None,
+            latency_ms,
         ),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def fetch_alert_eval_telemetry(
+    conn: sqlite3.Connection,
+    *,
+    model_id: Optional[str] = None,
+) -> list[dict]:
+    """Return alert_evaluations rows with telemetry columns for funnel analysis.
+
+    Columns returned: evaluation_id, event_id, decision, score, model_id,
+    parse_ok, latency_ms, created_ts.
+
+    Optionally filter by model_id.  Rows are ordered by evaluation_id
+    (insertion order) — stable for per-model parse-failure rate and latency
+    distribution queries (Task 14/16 consumers).
+    """
+    if model_id is not None:
+        rows = conn.execute(
+            "SELECT evaluation_id, event_id, decision, score, "
+            "model_id, parse_ok, latency_ms, created_ts "
+            "FROM alert_evaluations "
+            "WHERE model_id = ? "
+            "ORDER BY evaluation_id",
+            (model_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT evaluation_id, event_id, decision, score, "
+            "model_id, parse_ok, latency_ms, created_ts "
+            "FROM alert_evaluations "
+            "ORDER BY evaluation_id"
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # --------------------------------------------------------------------

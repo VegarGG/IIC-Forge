@@ -292,3 +292,13 @@ CREATE INDEX IF NOT EXISTS idx_brief_actions_result_job
 -- (sqlite does not support it on ALTER TABLE).
 ALTER TABLE costs ADD COLUMN cache_hit_tokens  INTEGER;
 ALTER TABLE costs ADD COLUMN cache_miss_tokens INTEGER;
+
+-- ============================================================
+-- Task 10: evaluator telemetry columns on alert_evaluations
+-- ============================================================
+-- Same idempotent-ALTER pattern as above — db.py swallows the
+-- "duplicate column name" error on re-run; no IF NOT EXISTS
+-- (sqlite does not support it on ALTER TABLE).
+ALTER TABLE alert_evaluations ADD COLUMN model_id    TEXT;
+ALTER TABLE alert_evaluations ADD COLUMN parse_ok    INTEGER;
+ALTER TABLE alert_evaluations ADD COLUMN latency_ms  INTEGER;
