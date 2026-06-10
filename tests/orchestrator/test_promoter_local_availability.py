@@ -239,6 +239,67 @@ def test_runtime_failure_skips_cycle_and_counts(
 
 
 # ---------------------------------------------------------------------------
+# Parse failures are neither transport-failure evidence nor health evidence:
+# they must not reset (or increment) the consecutive-failure run.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_parse_failure_neither_resets_nor_increments_consecutive(
+    tmp_path, caplog, monkeypatch, stub_local, stub_global
+):
+    """A gate evaluation that transports fine but fails to PARSE proves
+    nothing about endpoint health.  Sequence (fallback_threshold=2):
+    c1 transport fail (#1) → c2 parse-fail eval (NO reset, NO increment) →
+    c3 transport fail (#2) → the API fallback engages.  Were a parse failure
+    still treated as a success (record_success), c2 would reset the run and
+    c3 would only reach #1 — no engagement, no 're-resolved' log line."""
+    import httpx
+
+    import tradingagents.orchestrator.alert_evaluator as eval_mod
+    import tradingagents.orchestrator.promoter as promoter_mod
+
+    caplog.set_level(logging.INFO)
+    calls = {"n": 0}
+
+    def fake_evaluate(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            # Transport OK, parse failed — the evaluator's invalid_json path.
+            return eval_mod.AlertEvaluation(
+                passed=False, score=0.0,
+                payload={"decision": "reject", "score": 0.0},
+                disqualifiers=["invalid_json"], model_id="local-gate-model",
+                parse_ok=False, latency_ms=1,
+            )
+        raise httpx.ConnectError("endpoint down")  # in TRANSPORT_EXCEPTIONS
+
+    monkeypatch.setattr(eval_mod, "evaluate_alert_candidate", fake_evaluate)
+
+    cfg = _cfg(
+        tmp_path,
+        gate_role=_gate_role(provider="local", model="local-gate-model",
+                             base_url=stub_local.url + "/v1", fallback="api",
+                             fallback_threshold=2, fallback_daily_budget=500),
+        llm_provider="deepseek",
+        quick_think_llm="deepseek-v4-flash",
+        backend_url=stub_global.url + "/v1",
+    )
+    _seed_candidate(cfg["iic_db_path"])
+    monkeypatch.setattr(promoter_mod.time, "sleep", _SleepCtl(stop_after=3))
+
+    with pytest.raises(KeyboardInterrupt):
+        promoter_mod.main(config=cfg)
+
+    assert calls["n"] == 3
+    # c1 + c3 were transport failures; the c2 parse failure counted NOTHING.
+    check = connect(cfg["iic_db_path"])
+    assert store.get_ops_counter(check, name="promoter_llm_failures") == 2
+    # The consecutive run survived the c2 parse failure → c3 hit the
+    # threshold and engaged the fallback.
+    assert "re-resolved" in caplog.text.lower()
+
+
+# ---------------------------------------------------------------------------
 # Runtime fallback="api": engage after threshold, bounded by daily budget
 # ---------------------------------------------------------------------------
 

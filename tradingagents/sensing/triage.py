@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -52,10 +53,13 @@ def _open_cross_thread_conn(db_path: str) -> sqlite3.Connection:
     For sqlite objects that are created on one thread (the asyncio event-loop
     thread) but used from another (an executor / ``asyncio.to_thread`` worker).
     Callers MUST serialize access themselves — either a single worker thread
-    owns the connection (DedupeStage2's max_workers=1 executor) or every use
-    is wrapped in a lock (AvailabilityCounter / DailyFallbackBudget).  The
-    standard connect() helper is intentionally not used here to avoid changing
-    its global signature; no schema is applied (connect() already ran).
+    owns the connection (DedupeStage2's max_workers=1 executor) or every
+    holder of the connection wraps each use in ONE SHARED lock
+    (AvailabilityCounter + DailyFallbackBudget in ``_main``; per-holder locks
+    do NOT serialize cross-holder access and corrupt the C-level sqlite3
+    state).  The standard connect() helper is intentionally not used here to
+    avoid changing its global signature; no schema is applied (connect()
+    already ran).
     """
     if not db_path:
         raise ValueError(
@@ -231,6 +235,12 @@ class Triage:
         #   - deliberately SKIP stage-1/stage-2 dedupe RECORDING and ticker
         #     promotion: a redelivery of the same payload must be RE-SCORED,
         #     not swallowed as a duplicate of the unscored row.
+        #
+        # Operator note: this return is a HANDLED outcome — _process_entry
+        # XACKs the stream entry like any other, so re-scoring relies on the
+        # SOURCE re-publishing the payload (poll-based adapters do on their
+        # next sweep).  The deferred backlog is discoverable via
+        # `SELECT ... WHERE salience_source='deferred'`.
         if score.source == "deferred":
             if self._availability_counter is not None:
                 self._availability_counter.record_failure(reason=score.reason)
@@ -551,17 +561,24 @@ def _main() -> None:
     # OFF the main thread.  The main `conn` is main-thread-bound
     # (check_same_thread=True) — using it there raises
     # sqlite3.ProgrammingError, which the budget's except sqlite3.Error
-    # swallows, silently degrading persistence to in-memory.  Both classes
-    # hold their internal lock across EVERY access to this conn, so sharing
-    # it between the loop thread (record_failure) and to_thread workers
-    # (try_consume) is safe.
+    # swallows, silently degrading persistence to in-memory.
+    #
+    # ONE conn, ONE lock: the counter (record_failure, event-loop thread) and
+    # the budget (try_consume, to_thread workers) share this conn, so they
+    # must also share the lock that serializes every access to it.  Each
+    # object's default per-instance lock would leave cross-object conn calls
+    # unserialized — under interleaving the C-level sqlite3 module raises
+    # SystemError('error return without exception set') (NOT a sqlite3.Error,
+    # so it escapes the persistence except-nets into process_one) and loses
+    # persisted bumps.
     avail_conn = _open_cross_thread_conn(C["iic_db_path"])
+    avail_lock = threading.Lock()
     availability_counter = AvailabilityCounter(
-        name=TRIAGE_FAILURE_COUNTER, conn=avail_conn)
+        name=TRIAGE_FAILURE_COUNTER, conn=avail_conn, lock=avail_lock)
     fallback_budget = DailyFallbackBudget(
         name=TRIAGE_FALLBACK_BUDGET,
         max_per_day=int(role_cfg.get("fallback_daily_budget", 500)),
-        conn=avail_conn,
+        conn=avail_conn, lock=avail_lock,
     )
     # Mutable holder so runtime fallback engagement can swap the model for
     # subsequent calls without rebuilding the closure.

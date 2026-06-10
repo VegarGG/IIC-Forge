@@ -95,6 +95,29 @@ def test_probe_sends_health_and_one_token_completion(stub_server):
 
 
 @pytest.mark.unit
+def test_probe_passes_without_health_endpoint_via_completion_check(caplog):
+    """/health is a llama-server convention — an endpoint that 404s it but
+    answers the 1-token completion is ALIVE: warn and pass, don't refuse."""
+    from tradingagents.llm_clients.availability import probe_local_endpoint
+
+    caplog.set_level(logging.WARNING)
+    s = StubOpenAIServer(serve_health=False)
+    try:
+        probe_local_endpoint(base_url=s.url + "/v1", model="probe-model")
+        body = s.last_request_json
+    finally:
+        s.shutdown()
+
+    # The completion check ran and proved liveness...
+    assert body is not None, "probe did not POST a completion"
+    assert body["model"] == "probe-model"
+    assert body["max_tokens"] == 1
+    # ...and the missing /health was surfaced loudly.
+    assert "health" in caplog.text.lower()
+    assert "404" in caplog.text
+
+
+@pytest.mark.unit
 def test_probe_raises_typed_error_with_endpoint_and_model():
     from tradingagents.llm_clients.availability import (
         LocalEndpointUnavailable, probe_local_endpoint,

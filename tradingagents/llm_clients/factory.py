@@ -73,8 +73,9 @@ def create_role_llm(role: str, config: Dict[str, Any]) -> BaseLLMClient:
     ``chat_template_kwargs`` (e.g. ``enable_thinking=False``).
 
     The ``fallback`` key present in role entries is intentionally ignored here
-    (consumed by a later task).  ``extra_body`` is treated as READ-ONLY; the
-    config dict is never mutated.
+    — it is consumed by the availability layer
+    (``tradingagents.llm_clients.availability.resolve_role_llm_with_fallback``).
+    ``extra_body`` is treated as READ-ONLY; the config dict is never mutated.
 
     Args:
         role:   Key into ``config["llm_roles"]``.  A missing key is a config

@@ -384,8 +384,17 @@ ALTER TABLE events ADD COLUMN salience_source TEXT;
 -- in-memory only — because the L3 soak gate must query "failure counter = 0"
 -- across daemon restarts (an in-memory counter dies with the process).
 -- Names in use:
---   'triage_llm_failures', 'promoter_llm_failures'
---       — total LLM-availability failures per daemon (monotonic);
+--   'triage_llm_failures'
+--       — monotonic, per-EVENT: one bump per envelope whose salience the
+--         scorer deferred, INCLUDING parse_error defers (transport fine,
+--         model emitted garbage);
+--   'promoter_llm_failures'
+--       — monotonic, per-CYCLE: one bump per poll cycle skipped on a gate
+--         TRANSPORT failure only; a gate parse failure counts NOTHING
+--         (neither bump nor consecutive-run reset).
+--   UNITS therefore differ between the two daemons (events vs cycles, parse
+--   failures counted vs ignored) — deliberate asymmetry, compare with care;
+--   full rationale in availability.py's module docstring.
 --   'triage_fallback_calls:<YYYY-MM-DD>', 'promoter_fallback_calls:<YYYY-MM-DD>'
 --       — per-UTC-day fallback API call counts (hard daily budget enforcement).
 CREATE TABLE IF NOT EXISTS ops_counters (

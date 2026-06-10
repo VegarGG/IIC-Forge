@@ -99,6 +99,13 @@ def run_once(
                 log.info("light alert composed event_id=%s tickers=%s",
                          g["event_id"], fresh)
             except Exception:
+                # Operator note: transport failures inside compose are
+                # swallowed HERE (per-event, the pass continues) and are NOT
+                # counted by the availability counter — only gate-evaluator
+                # transport failures reach main's TRANSPORT_EXCEPTIONS
+                # handler.  A partial outage that breaks compose but not the
+                # gate is therefore visible in this log line, not in
+                # promoter_llm_failures.  Deliberate scope (D5).
                 log.exception("light alert failed event_id=%s; continuing",
                               g["event_id"])
         return composed
@@ -183,6 +190,11 @@ def main(config: Optional[dict] = None) -> None:
         (role_cfg.get("provider") or cfg.get("llm_provider") or "").lower()
         == "local"
     )
+    # Counter + budget share the promoter's main conn WITHOUT a shared lock —
+    # safe because this daemon is single-threaded: record_failure /
+    # record_success / try_consume all run inline on the loop thread, and the
+    # conn is check_same_thread=True anyway.  (Contrast triage._main, which
+    # must pass ONE shared lock for its cross-thread conn.)
     avail_counter = AvailabilityCounter(
         name=PROMOTER_FAILURE_COUNTER, conn=conn)
     fallback_budget = DailyFallbackBudget(
@@ -240,7 +252,14 @@ def main(config: Optional[dict] = None) -> None:
                 tickers=list(tickers),
                 min_score=cfg.get("alert_quality_threshold", 0.80),
             )
-            avail_counter.record_success()
+            # Health evidence only: a parse failure (transport OK, garbage
+            # output) neither increments the failure counter nor resets the
+            # consecutive run — it is not transport-failure evidence, and a
+            # model emitting unparseable output is not health evidence
+            # either.  (Triage, by contrast, counts parse defers per event —
+            # see the units note in availability.py's module docstring.)
+            if evaluation.parse_ok:
+                avail_counter.record_success()
             return evaluation
 
     log.info("promoter starting: poll=%ss cooldown=%sm guards: bp=%s rate=%s",

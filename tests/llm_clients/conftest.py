@@ -55,7 +55,7 @@ class _StubHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/health":
+        if self.path == "/health" and getattr(self.server, "serve_health", True):
             body = b'{"status": "ok"}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -97,11 +97,17 @@ class _StubHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 class StubOpenAIServer:
-    """Thin wrapper around ThreadingHTTPServer that exposes url and last_request_json."""
+    """Thin wrapper around ThreadingHTTPServer that exposes url and last_request_json.
 
-    def __init__(self) -> None:
+    ``serve_health=False`` makes GET /health return 404, modeling local
+    OpenAI-compatible servers (vLLM at non-root paths, plain proxies) that
+    do not expose llama-server's /health route.
+    """
+
+    def __init__(self, *, serve_health: bool = True) -> None:
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _StubHandler)
         self._server.last_request_json: Optional[dict] = None  # type: ignore[attr-defined]
+        self._server.serve_health = serve_health  # type: ignore[attr-defined]
         self._thread = threading.Thread(
             target=self._server.serve_forever,
             name="stub-openai-server",

@@ -17,6 +17,18 @@ need to survive a local LLM endpoint outage WITHOUT silent degradation:
 Counter names (see also schema.sql's ops_counters comment):
   TRIAGE_FAILURE_COUNTER / PROMOTER_FAILURE_COUNTER   — monotonic failures
   TRIAGE_FALLBACK_BUDGET / PROMOTER_FALLBACK_BUDGET   — '<name>:<YYYY-MM-DD>'
+
+Counter UNITS differ by daemon — deliberate asymmetry, compare with care:
+  - ``triage_llm_failures`` counts per-EVENT deferred scores: every envelope
+    whose salience the scorer could not produce, INCLUDING parse_error defers
+    (a local model emitting garbage is a triage-health problem even when the
+    transport is fine; see triage.process_one).
+  - ``promoter_llm_failures`` counts per-CYCLE transport failures only: one
+    bump per poll cycle skipped because TRANSPORT_EXCEPTIONS escaped the gate
+    call.  A gate evaluation that transports fine but fails to PARSE counts
+    NOTHING — it neither increments the counter nor resets the consecutive
+    run (not transport-failure evidence, not health evidence either; see the
+    ``parse_ok`` gate in promoter.main's alert_evaluator).
 """
 
 from __future__ import annotations
@@ -94,14 +106,20 @@ def probe_local_endpoint(
     """Eagerly verify a local OpenAI-compatible endpoint is alive.
 
     Two checks, mirroring what the daemons need at runtime:
-      1. ``GET {root}/health``      — llama-server serves /health at the
-         server root, so a trailing ``/v1`` is stripped for this check;
+      1. ``GET {root}/health`` — a llama-server CONVENTION (it serves /health
+         at the server root, so a trailing ``/v1`` is stripped).  A 404 means
+         "this server does not expose /health" (e.g. vLLM behind a path
+         prefix, plain OpenAI-compatible proxies) — logged as a warning and
+         tolerated, because check 2 proves liveness anyway.  Any other
+         non-200 (5xx = up-but-failing, llama-server's 503 while the model
+         loads) still fails the probe, as do all transport errors.
       2. ``POST {base}/chat/completions`` with ``max_tokens=1`` — proves the
          MODEL actually completes, not just that an HTTP server is listening.
 
     Raises:
-        LocalEndpointUnavailable: on any transport error or non-200 response,
-            with the endpoint + model identity in the message.
+        LocalEndpointUnavailable: on any transport error, a non-200/non-404
+            health response, or a non-200 completion response — with the
+            endpoint + model identity in the message.
     """
     base = (base_url or "").rstrip("/")
     if not base:
@@ -113,7 +131,14 @@ def probe_local_endpoint(
 
     try:
         resp = requests.get(f"{root}/health", headers=headers, timeout=timeout)
-        if resp.status_code != 200:
+        if resp.status_code == 404:
+            log.warning(
+                "GET /health returned 404 — endpoint does not expose "
+                "llama-server's /health route; relying on the 1-token "
+                "completion check for liveness: endpoint=%s model=%s",
+                base, model,
+            )
+        elif resp.status_code != 200:
             raise LocalEndpointUnavailable(
                 f"health check failed (HTTP {resp.status_code}): "
                 f"endpoint={base} model={model}"
@@ -152,16 +177,25 @@ class AvailabilityCounter:
     ``last_reason``) drive the runtime fallback threshold; every failure is
     ALSO bumped into the ``ops_counters`` row named ``name`` so the soak
     report (Task 16) and the endpoint-down self-alert (Task 17) can read a
-    restart-surviving total.  Thread-safe: ``self._lock`` wraps the in-memory
-    state AND every ``self._conn`` access, so callers may hand this class a
-    shared ``check_same_thread=False`` connection that is also touched from
-    other threads (the triage daemon does — see ``triage._main``).
+    restart-surviving total.
+
+    Thread-safety: ``self._lock`` serializes THIS object's in-memory state
+    and its own ``self._conn`` calls — it cannot serialize OTHER objects
+    touching the same connection.  When the conn is SHARED with another
+    holder (triage._main shares one ``check_same_thread=False`` conn with a
+    DailyFallbackBudget), every holder must be constructed with the SAME
+    ``lock``; with separate locks the C-level sqlite3 calls interleave,
+    raising SystemError / sqlite3 errors and silently losing persisted
+    bumps.  The default per-instance lock is safe only when this object is
+    the connection's sole cross-thread user (the promoter: single-threaded,
+    own conn).
     """
 
-    def __init__(self, *, name: str, conn: Optional[sqlite3.Connection] = None):
+    def __init__(self, *, name: str, conn: Optional[sqlite3.Connection] = None,
+                 lock: Optional[threading.Lock] = None):
         self.name = name
         self._conn = conn
-        self._lock = threading.Lock()
+        self._lock = lock if lock is not None else threading.Lock()
         self.consecutive = 0
         self.total = 0
         self.last_failure_ts: Optional[str] = None
@@ -173,9 +207,9 @@ class AvailabilityCounter:
             self.total += 1
             self.last_failure_ts = datetime.now(timezone.utc).isoformat()
             self.last_reason = reason
-            # Persist INSIDE the lock so all conn access is serialized — the
-            # conn may be shared with a DailyFallbackBudget consumed from
-            # asyncio.to_thread workers (triage's call_llm).
+            # Persist INSIDE the lock.  This serializes the conn only against
+            # holders of THIS lock — which is why triage._main constructs the
+            # counter and the budget sharing its conn with one shared lock.
             if self._conn is not None:
                 try:
                     store.bump_ops_counter(self._conn, name=self.name)
@@ -195,18 +229,22 @@ class DailyFallbackBudget:
     re-read on the first consume of each day, so a daemon restart cannot
     reset an exhausted budget.
 
-    Thread-safe: ``try_consume`` holds ``self._lock`` across ALL ``_conn``
-    reads/writes, so a shared ``check_same_thread=False`` connection may be
-    consumed from worker threads (triage's call_llm runs inside
-    ``asyncio.to_thread``).
+    Thread-safety: ``try_consume`` holds ``self._lock`` across the date
+    observation and ALL of its own ``_conn`` reads/writes — but the lock
+    cannot serialize OTHER objects touching the same connection.  As with
+    AvailabilityCounter, callers sharing one conn between objects/threads
+    (triage._main: record_failure on the event-loop thread, try_consume in
+    ``asyncio.to_thread`` workers) must pass the SAME ``lock`` to every
+    holder; the default per-instance lock is for sole-user conns only.
     """
 
     def __init__(self, *, name: str, max_per_day: int,
-                 conn: Optional[sqlite3.Connection] = None):
+                 conn: Optional[sqlite3.Connection] = None,
+                 lock: Optional[threading.Lock] = None):
         self.name = name
         self.max_per_day = int(max_per_day)
         self._conn = conn
-        self._lock = threading.Lock()
+        self._lock = lock if lock is not None else threading.Lock()
         self._date: Optional[str] = None
         self._spent = 0
 
@@ -215,8 +253,12 @@ class DailyFallbackBudget:
 
     def try_consume(self) -> bool:
         """Consume one fallback call. False when today's budget is exhausted."""
-        today = datetime.now(timezone.utc).date().isoformat()
         with self._lock:
+            # Date observed INSIDE the lock so observations are monotonic
+            # across the midnight rollover — an unlocked read could be
+            # ordered after a competing thread's newer date and resurrect
+            # yesterday's (already-rolled) spend.
+            today = datetime.now(timezone.utc).date().isoformat()
             if self._date != today:
                 self._date = today
                 self._spent = 0
