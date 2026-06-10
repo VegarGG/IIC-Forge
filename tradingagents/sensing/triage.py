@@ -576,13 +576,19 @@ def _main() -> None:
     # new config key), the counter fires the operator self-alert EXACTLY
     # ONCE per outage (debounced in the counter, re-armed by
     # record_success).  Lock discipline: record_failure releases the SHARED
-    # avail_lock BEFORE invoking the callback, so the (possibly blocking)
-    # transport send never holds the lock the to_thread budget workers need.
+    # avail_lock BEFORE invoking the callback, so the transport send never
+    # holds the lock the to_thread budget workers need.
     # The callback runs on whichever thread recorded the crossing failure —
-    # here that is process_one on the event-loop thread; at most one
-    # blocking send per outage is an accepted stall.
+    # here that is process_one on the event-loop thread.  The send is
+    # NON-BLOCKING: when called from a running event-loop thread, a daemon
+    # thread is spawned so the loop is never stalled (see self_alert.py).
     from tradingagents.ops import self_alert
-    alerter = self_alert.build_self_alerter(C)
+    _alert_base_url = getattr(quick_client, "base_url", None) or ""
+    _alert_context = (
+        f"role=triage_salience provider=local "
+        f"model={quick_client.model} endpoint={_alert_base_url}"
+    )
+    alerter = self_alert.build_self_alerter(C, context=_alert_context)
     avail_conn = _open_cross_thread_conn(C["iic_db_path"])
     avail_lock = threading.Lock()
     availability_counter = AvailabilityCounter(

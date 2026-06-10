@@ -202,7 +202,14 @@ def main(config: Optional[dict] = None) -> None:
     # per outage (debounced in the counter, re-armed by record_success).
     # The callback runs outside the counter lock, inline on this loop thread.
     from tradingagents.ops import self_alert
-    alerter = self_alert.build_self_alerter(cfg)
+    _alert_provider = (role_cfg.get("provider") or cfg.get("llm_provider") or "").lower()
+    _alert_model = role_cfg.get("model") or ""
+    _alert_endpoint = role_cfg.get("base_url") or ""
+    _alert_context = (
+        f"role=alert_gate provider={_alert_provider} "
+        f"model={_alert_model} endpoint={_alert_endpoint}"
+    )
+    alerter = self_alert.build_self_alerter(cfg, context=_alert_context)
     avail_counter = AvailabilityCounter(
         name=PROMOTER_FAILURE_COUNTER, conn=conn,
         alert_threshold=fallback_threshold,

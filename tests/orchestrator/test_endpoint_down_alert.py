@@ -15,7 +15,9 @@ Covers:
   - daemon wiring: the promoter loop emits the alert via its counter
     (mirrors test_promoter_local_availability.py's harness) and triage's
     ``_main`` constructs its counter with the alert seam armed (mirrors
-    test_triage_local_availability.py's capture harness).
+    test_triage_local_availability.py's capture harness);
+  - non-blocking send: the transport called from a running event-loop thread
+    must return promptly (< 1 s) without stalling the loop.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
 
 import pytest
 
@@ -60,11 +63,11 @@ class _RecordingTransport:
 
 
 def _alerting_counter(transport, *, name="promoter_llm_failures",
-                      threshold=3):
+                      threshold=3, context=""):
     from tradingagents.llm_clients.availability import AvailabilityCounter
     from tradingagents.ops.self_alert import SelfAlerter
 
-    alerter = SelfAlerter(transport=transport)
+    alerter = SelfAlerter(transport=transport, context=context)
     return AvailabilityCounter(
         name=name,
         alert_threshold=threshold,
@@ -102,9 +105,13 @@ def test_alert_fires_exactly_once_at_threshold_not_per_failure():
 
 @pytest.mark.unit
 def test_alert_message_identifies_the_endpoint_failure():
+    """Alert message must include counter identity, failure reason, and the
+    endpoint/model context so the operator knows which service is down."""
     transport = _RecordingTransport()
-    counter = _alerting_counter(transport, name="promoter_llm_failures",
-                                threshold=2)
+    counter = _alerting_counter(
+        transport, name="promoter_llm_failures", threshold=2,
+        context="role=alert_gate provider=local model=qwen3:6b endpoint=http://192.168.1.50:8080/v1",
+    )
 
     counter.record_failure(reason="ConnectError: connection refused")
     counter.record_failure(reason="ConnectError: connection refused")
@@ -115,6 +122,10 @@ def test_alert_message_identifies_the_endpoint_failure():
     assert "promoter_llm_failures" in msg
     assert "ConnectError: connection refused" in msg
     assert "consecutive=2" in msg
+    # Context fields must appear so the operator knows which endpoint died.
+    assert "role=alert_gate" in msg
+    assert "model=qwen3:6b" in msg
+    assert "endpoint=http://192.168.1.50:8080/v1" in msg
 
 
 @pytest.mark.unit
@@ -238,18 +249,32 @@ def test_telegram_transport_unconfigured_returns_none(monkeypatch):
 
 @pytest.mark.unit
 def test_telegram_transport_sends_to_first_allowed_chat(monkeypatch):
+    """Transport routes the message to the first allowed chat_id via PTB Bot.
+
+    The new implementation builds a fresh Bot per send (no _get_bot cache
+    use), so we patch ``telegram.Bot`` directly at the PTB import boundary.
+    """
     from tradingagents.ops.self_alert import telegram_transport
-    import tradingagents.delivery.telegram as tg_mod
+    import telegram as tg_pkg
 
     sent = {}
 
     class _FakeBot:
-        async def send_message(self, *, chat_id, text):
+        def __init__(self, *, token, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def send_message(self, *, chat_id, text, **kwargs):
             sent["chat_id"] = chat_id
             sent["text"] = text
 
     monkeypatch.setenv("IIC_TELEGRAM_BOT_TOKEN", "tok")
-    monkeypatch.setattr(tg_mod, "_get_bot", lambda token: _FakeBot())
+    monkeypatch.setattr(tg_pkg, "Bot", _FakeBot)
 
     transport = telegram_transport(
         {"telegram_bot": {"enabled": True, "allowed_chat_ids": [42, 99]}}
@@ -259,6 +284,64 @@ def test_telegram_transport_sends_to_first_allowed_chat(monkeypatch):
 
     assert sent["chat_id"] == 42
     assert "local LLM endpoint down" in sent["text"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: non-blocking send from a running event-loop thread
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_telegram_transport_non_blocking_from_event_loop(monkeypatch):
+    """When the transport is called from inside a running coroutine (the
+    triage event-loop thread), it must return promptly — NOT block the loop
+    for up to 30 s (the old run_coroutine_threadsafe(...).result(timeout=30)
+    hazard).
+
+    RED against the old _run_coro blocking path; GREEN after the daemon-thread
+    fix.  We assert elapsed < 1 s.  A recording async stub is used for the PTB
+    boundary so no real network call is made.
+    """
+    import telegram as tg_pkg
+    from tradingagents.ops.self_alert import telegram_transport
+
+    sent = {}
+
+    class _FakeBot:
+        def __init__(self, *, token, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def send_message(self, *, chat_id, text, **kwargs):
+            sent["chat_id"] = chat_id
+            sent["text"] = text
+
+    monkeypatch.setenv("IIC_TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setattr(tg_pkg, "Bot", _FakeBot)
+
+    transport = telegram_transport(
+        {"telegram_bot": {"enabled": True, "allowed_chat_ids": [7]}}
+    )
+    assert transport is not None
+
+    elapsed_holder: list[float] = []
+
+    async def _run_from_loop():
+        t0 = time.monotonic()
+        transport("msg from loop")
+        elapsed_holder.append(time.monotonic() - t0)
+
+    asyncio.run(_run_from_loop())
+
+    assert elapsed_holder, "elapsed was never recorded"
+    assert elapsed_holder[0] < 1.0, (
+        f"transport call from event-loop thread took {elapsed_holder[0]:.2f}s "
+        f"(expected < 1 s — loop must not be blocked)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +399,7 @@ def test_promoter_emits_endpoint_down_alert_once(tmp_path, monkeypatch):
     transport = _RecordingTransport()
     monkeypatch.setattr(
         self_alert_mod, "build_self_alerter",
-        lambda config: self_alert_mod.SelfAlerter(transport=transport),
+        lambda config, **kw: self_alert_mod.SelfAlerter(transport=transport),
     )
 
     cfg = {
@@ -376,7 +459,7 @@ def test_triage_main_wires_alert_seam_into_counter(tmp_path, monkeypatch):
     transport = _RecordingTransport()
     monkeypatch.setattr(
         self_alert_mod, "build_self_alerter",
-        lambda config: self_alert_mod.SelfAlerter(transport=transport),
+        lambda config, **kw: self_alert_mod.SelfAlerter(transport=transport),
     )
     try:
         monkeypatch.setattr(redis_mod, "make_redis", lambda url: object())
