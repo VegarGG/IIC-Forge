@@ -279,3 +279,91 @@ def test_shadow_eval_event_id_no_fk_constraint(tmp_path):
     rows = store.fetch_shadow_eval(conn)
     assert len(rows) == 1
     assert rows[0]["event_id"] == "dangling-event-id"
+
+
+# ---------------------------------------------------------------------------
+# fetch_shadow_eval newest=True — Issue 3
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_fetch_shadow_eval_newest_limit(tmp_path):
+    """newest=True + limit returns the NEWEST N rows, re-sorted ascending by
+    shadow_id so callers get a consistent time-ordered slice."""
+    conn = connect(str(tmp_path / "iic.db"))
+    ts = _now()
+    # Insert 5 rows: event ids old-0..old-4
+    for i in range(5):
+        store.insert_shadow_eval(
+            conn, event_id=f"old-{i}", model_id="m1",
+            api_salience=0.1, local_salience=None, salience_delta=None,
+            api_verdict=None, local_verdict=None,
+            parse_ok=True, latency_ms=10, created_ts=ts,
+        )
+    # 2 newest rows: new-0, new-1
+    for i in range(2):
+        store.insert_shadow_eval(
+            conn, event_id=f"new-{i}", model_id="m1",
+            api_salience=0.9, local_salience=None, salience_delta=None,
+            api_verdict=None, local_verdict=None,
+            parse_ok=True, latency_ms=999, created_ts=ts,
+        )
+
+    rows = store.fetch_shadow_eval(conn, limit=2, newest=True)
+    assert len(rows) == 2
+    # Must be re-sorted ascending (shadow_id order), but contain the 2 newest.
+    assert all(r["latency_ms"] == 999 for r in rows)
+    # Ascending shadow_id order preserved.
+    assert rows[0]["shadow_id"] < rows[1]["shadow_id"]
+
+
+@pytest.mark.unit
+def test_fetch_shadow_eval_newest_with_model_id(tmp_path):
+    """newest=True + model_id filter: returns newest N rows for that model."""
+    conn = connect(str(tmp_path / "iic.db"))
+    ts = _now()
+    # 3 rows for model-A (old), 2 rows for model-B, 2 rows for model-A (new)
+    for i in range(3):
+        store.insert_shadow_eval(
+            conn, event_id=f"a-old-{i}", model_id="model-A",
+            api_salience=0.1, local_salience=None, salience_delta=None,
+            api_verdict=None, local_verdict=None,
+            parse_ok=True, latency_ms=10, created_ts=ts,
+        )
+    for i in range(2):
+        store.insert_shadow_eval(
+            conn, event_id=f"b-{i}", model_id="model-B",
+            api_salience=None, local_salience=None, salience_delta=None,
+            api_verdict="pass", local_verdict="pass",
+            parse_ok=True, latency_ms=50, created_ts=ts,
+        )
+    for i in range(2):
+        store.insert_shadow_eval(
+            conn, event_id=f"a-new-{i}", model_id="model-A",
+            api_salience=0.9, local_salience=None, salience_delta=None,
+            api_verdict=None, local_verdict=None,
+            parse_ok=True, latency_ms=999, created_ts=ts,
+        )
+
+    rows = store.fetch_shadow_eval(conn, model_id="model-A", limit=2, newest=True)
+    assert len(rows) == 2
+    assert all(r["model_id"] == "model-A" for r in rows)
+    assert all(r["latency_ms"] == 999 for r in rows)
+
+
+@pytest.mark.unit
+def test_fetch_shadow_eval_newest_false_unchanged(tmp_path):
+    """newest=False (default) still returns oldest N rows."""
+    conn = connect(str(tmp_path / "iic.db"))
+    ts = _now()
+    for i in range(4):
+        store.insert_shadow_eval(
+            conn, event_id=f"e-{i}", model_id="m1",
+            api_salience=0.1, local_salience=None, salience_delta=None,
+            api_verdict=None, local_verdict=None,
+            parse_ok=True, latency_ms=i * 100, created_ts=ts,
+        )
+    rows = store.fetch_shadow_eval(conn, limit=2, newest=False)
+    assert len(rows) == 2
+    # Oldest two: latency_ms 0 and 100
+    assert rows[0]["latency_ms"] == 0
+    assert rows[1]["latency_ms"] == 100

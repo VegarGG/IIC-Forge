@@ -649,6 +649,7 @@ def fetch_shadow_eval(
     *,
     model_id: Optional[str] = None,
     limit: Optional[int] = None,
+    newest: bool = False,
 ) -> list[dict]:
     """Return shadow_eval rows for the Task-14 reporter.
 
@@ -657,17 +658,36 @@ def fetch_shadow_eval(
     latency_ms, created_ts.
 
     Optionally filter by ``model_id``.  Optionally cap results with ``limit``.
-    Rows are ordered by shadow_id (insertion order) — stable for MAE /
-    agreement / κ / latency-percentile queries.
+
+    When ``newest=False`` (default): rows ordered by shadow_id ASC, LIMIT
+    takes the *oldest* N rows — stable insertion-order slice.
+
+    When ``newest=True``: LIMIT takes the *newest* N rows (ORDER BY
+    shadow_id DESC internally) then re-sorts them ascending by shadow_id
+    before returning, so callers always receive a time-ordered slice.  Use
+    this for ``--report-only --limit N`` to ensure the reporter sees the most
+    recent run rather than a stale prefix.
     """
     where = "WHERE model_id = ? " if model_id is not None else ""
-    limit_clause = f"LIMIT {int(limit)}" if limit is not None else ""
-    sql = (
-        "SELECT shadow_id, event_id, model_id, "
-        "api_salience, local_salience, salience_delta, "
-        "api_verdict, local_verdict, parse_ok, latency_ms, created_ts "
-        f"FROM shadow_eval {where}ORDER BY shadow_id {limit_clause}"
-    )
     params = (model_id,) if model_id is not None else ()
+
+    if newest and limit is not None:
+        # Fetch the newest N rows (DESC), then re-sort ascending for the caller.
+        inner_sql = (
+            "SELECT shadow_id, event_id, model_id, "
+            "api_salience, local_salience, salience_delta, "
+            "api_verdict, local_verdict, parse_ok, latency_ms, created_ts "
+            f"FROM shadow_eval {where}ORDER BY shadow_id DESC LIMIT {int(limit)}"
+        )
+        sql = f"SELECT * FROM ({inner_sql}) ORDER BY shadow_id ASC"
+    else:
+        limit_clause = f"LIMIT {int(limit)}" if limit is not None else ""
+        sql = (
+            "SELECT shadow_id, event_id, model_id, "
+            "api_salience, local_salience, salience_delta, "
+            "api_verdict, local_verdict, parse_ok, latency_ms, created_ts "
+            f"FROM shadow_eval {where}ORDER BY shadow_id ASC {limit_clause}"
+        )
+
     rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]

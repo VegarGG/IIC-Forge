@@ -36,6 +36,18 @@ Method/measurement decisions (documented per the task):
     whose model_id != candidate (NULL model_id counts as API-side legacy rows)
     is used; when neither exists the line prints "n/a".
 
+Run-separation and append-only semantics:
+  * shadow_eval rows are append-only across runs — there is NO run_id column.
+    Re-runs of the same model mix into the same table; subsequent reports will
+    span multiple replay sessions unless ``--limit`` bounds the query to the
+    newest run.
+  * ``--report-only --limit N`` always fetches the NEWEST N rows (using
+    ``fetch_shadow_eval(..., newest=True)``).  After a 500-event replay that
+    writes ~1 000 rows, ``--limit 1000`` will report on exactly that run.
+  * KeyboardInterrupt during replay leaves all already-committed rows intact
+    (each ``insert_shadow_eval`` commits immediately).  Re-running simply
+    appends new rows; use ``--limit`` to scope the reporter to the new run.
+
 CLI:
   python scripts/shadow_eval.py --model qwen3.6-27b-instruct-q4_k_m
   python scripts/shadow_eval.py --model cand --report-only        # no network
@@ -168,6 +180,12 @@ def compute_report(
     # --- parse-failure rate -----------------------------------------------
     failures = sum(1 for r in rows if not r.get("parse_ok"))
     failure_rate = (failures / n_rows) if n_rows else None
+    # API-side salience failures: rows where api_salience is NULL (API call
+    # failed or was absent) — run-time visibility only, no schema change.
+    api_failures = sum(
+        1 for r in rows
+        if r.get("api_salience") is None and r.get("local_salience") is not None
+    )
 
     # --- L2 gate verdicts ---------------------------------------------------
     gate = {
@@ -207,6 +225,7 @@ def compute_report(
             "n_rows": n_rows,
             "failures": failures,
             "failure_rate": failure_rate,
+            "api_failures": api_failures,
         },
         "gate": gate,
     }
@@ -249,7 +268,8 @@ def format_report(report: Dict[str, Any], *, model_id: str = "") -> str:
         ),
         (
             f"parse failures: {par['failures']}/{par['n_rows']} "
-            f"(rate={_fmt(par['failure_rate'])})"
+            f"(rate={_fmt(par['failure_rate'])}) "
+            f"api_failures={par.get('api_failures', 0)}"
         ),
         "L2 gate:",
         _gate_line(
@@ -442,8 +462,9 @@ def replay(
     ticker_conf = cfg.get("alert_ticker_confidence_threshold", 0.8)
 
     events = load_replay_events(conn, limit=limit)
+    n_events = len(events)
     rows: List[Dict[str, Any]] = []
-    for ev in events:
+    for i, ev in enumerate(events, start=1):
         created_ts = datetime.now(timezone.utc).isoformat()
         env = Envelope(
             source=ev["source"], ingested_ts=ev["ingested_ts"],
@@ -487,35 +508,84 @@ def replay(
             and ev["salience"] is not None
             and ev["salience"] >= salience_promote
         )
-        if not promotable:
-            continue
-        api_eval = evaluate_alert_candidate(
-            llm=api_gate_llm, event_text=ev["raw_text"], tickers=tickers,
-            min_score=confidence_threshold, model_id=api_gate.model,
+
+        api_verdict: Optional[str] = None
+        local_verdict: Optional[str] = None
+        gate_parse_ok: bool = True
+        gate_lat: int = 0
+
+        if promotable:
+            # Wrap each gate call independently so a network/parse failure on
+            # one side does not abort the entire replay run.
+            # KeyboardInterrupt is NOT caught (Exception does not cover it).
+            api_eval = None
+            try:
+                api_eval = evaluate_alert_candidate(
+                    llm=api_gate_llm, event_text=ev["raw_text"],
+                    tickers=tickers, min_score=confidence_threshold,
+                    model_id=api_gate.model,
+                )
+                api_verdict = "pass" if api_eval.passed else "reject"
+            except Exception as exc:
+                print(
+                    f"[shadow_eval] gate api-side error for {ev['event_id']}: "
+                    f"{exc}",
+                    file=sys.stderr, flush=True,
+                )
+                gate_parse_ok = False
+
+            loc_eval = None
+            try:
+                loc_eval = evaluate_alert_candidate(
+                    llm=local_gate_llm, event_text=ev["raw_text"],
+                    tickers=tickers, min_score=confidence_threshold,
+                    model_id=local_gate.model,
+                )
+                local_verdict = "pass" if loc_eval.passed else "reject"
+                gate_parse_ok = gate_parse_ok and bool(loc_eval.parse_ok)
+                gate_lat = loc_eval.latency_ms or 0
+            except Exception as exc:
+                print(
+                    f"[shadow_eval] gate local-side error for {ev['event_id']}: "
+                    f"{exc}",
+                    file=sys.stderr, flush=True,
+                )
+                gate_parse_ok = False
+
+            shadow_id = store.insert_shadow_eval(
+                conn,
+                event_id=ev["event_id"], model_id=model,
+                api_verdict=api_verdict, local_verdict=local_verdict,
+                parse_ok=gate_parse_ok,
+                latency_ms=gate_lat, created_ts=created_ts,
+            )
+            rows.append({
+                "shadow_id": shadow_id, "event_id": ev["event_id"],
+                "model_id": model,
+                "api_salience": None, "local_salience": None,
+                "salience_delta": None,
+                "api_verdict": api_verdict, "local_verdict": local_verdict,
+                "parse_ok": 1 if gate_parse_ok else 0,
+                "latency_ms": gate_lat,
+                "created_ts": created_ts, "raw_text": ev["raw_text"],
+            })
+
+        # --- per-event progress line to stderr (Issue 2) -----------------
+        _sal_api = _fmt(api_sal) if api_sal is not None else "err"
+        _sal_loc = _fmt(loc_sal) if loc_sal is not None else "err"
+        _gate_api = api_verdict if api_verdict is not None else (
+            "skip" if not promotable else "err"
         )
-        loc_eval = evaluate_alert_candidate(
-            llm=local_gate_llm, event_text=ev["raw_text"], tickers=tickers,
-            min_score=confidence_threshold, model_id=local_gate.model,
+        _gate_loc = local_verdict if local_verdict is not None else (
+            "skip" if not promotable else "err"
         )
-        api_verdict = "pass" if api_eval.passed else "reject"
-        local_verdict = "pass" if loc_eval.passed else "reject"
-        shadow_id = store.insert_shadow_eval(
-            conn,
-            event_id=ev["event_id"], model_id=model,
-            api_verdict=api_verdict, local_verdict=local_verdict,
-            parse_ok=bool(loc_eval.parse_ok),
-            latency_ms=loc_eval.latency_ms, created_ts=created_ts,
+        print(
+            f"[{i}/{n_events}] {ev['event_id']} "
+            f"sal(api={_sal_api}, loc={_sal_loc}) "
+            f"gate(api={_gate_api}, loc={_gate_loc})",
+            file=sys.stderr, flush=True,
         )
-        rows.append({
-            "shadow_id": shadow_id, "event_id": ev["event_id"],
-            "model_id": model,
-            "api_salience": None, "local_salience": None,
-            "salience_delta": None,
-            "api_verdict": api_verdict, "local_verdict": local_verdict,
-            "parse_ok": 1 if loc_eval.parse_ok else 0,
-            "latency_ms": loc_eval.latency_ms,
-            "created_ts": created_ts, "raw_text": ev["raw_text"],
-        })
+
     return rows
 
 
@@ -630,7 +700,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if args.report_only:
             rows: List[Dict[str, Any]] = store.fetch_shadow_eval(
-                conn, model_id=args.model, limit=args.limit)
+                conn, model_id=args.model, limit=args.limit, newest=True)
         else:
             rows = replay(
                 conn,

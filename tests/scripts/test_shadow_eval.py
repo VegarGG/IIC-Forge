@@ -4,13 +4,18 @@ Covers:
 - compute_report over synthetic shadow_eval rows with hand-computed
   expectations: salience MAE, threshold-crossing agreement @0.85, evaluator
   verdict agreement + Cohen's kappa, p50/p95 latency (linear interpolation),
-  parse-failure rate, and the L2 gate verdict fields.
+  parse-failure rate, api_failures count, and the L2 gate verdict fields.
 - cohen_kappa / percentile helpers directly (incl. degenerate kappa cases).
 - CLI flag surface (--limit, --model, --persist-set, --report-only, --db,
   --api-p95-ms) via main(argv) against a tmp DB seeded with
   insert_shadow_eval. No network, no subprocess (the module is imported and
   main() is called directly — see the pre-existing subprocess-import env
   failure in tests/scripts/test_compare_deepseek_prompt_cache.py).
+- Issue 1: gate-call failures are caught; replay continues; parse_ok=0 row
+  recorded; subsequent events still processed.
+- Issue 2: per-event progress printed to stderr (loose format check).
+- Issue 3: --report-only --limit N takes the NEWEST N rows.
+- Issue 4: api_failures count in compute_report; surfaced in format_report.
 """
 
 from __future__ import annotations
@@ -549,3 +554,222 @@ def test_default_persist_path_shape():
     assert path.startswith("shadow_eval_set_")
     assert path.endswith(".json")
     assert "/" not in path  # model id is sanitized into a flat filename
+
+
+# ---------------------------------------------------------------------------
+# Issue 1: gate-call failures — replay survives, parse_ok=0 row recorded
+# ---------------------------------------------------------------------------
+
+class _RaisingLLM:
+    """Raises RuntimeError on invoke (simulates API connection failure)."""
+
+    def invoke(self, prompt):
+        raise RuntimeError("simulated gate API failure")
+
+
+class _RaisingClient:
+    def __init__(self, model: str) -> None:
+        self.model = model
+
+    def get_llm(self):
+        return _RaisingLLM()
+
+
+@pytest.mark.unit
+def test_replay_gate_failure_continues_and_records_parse_ok_false(
+    tmp_path, monkeypatch, capsys
+):
+    """If evaluate_alert_candidate raises for an event, replay records a
+    parse_ok=0 gate row for that event and continues processing subsequent
+    events.  KeyboardInterrupt must still propagate (not tested here — it
+    cannot be raised from the gate stub without aborting pytest itself).
+    """
+    db = str(tmp_path / "iic.db")
+    conn = connect(db)
+
+    # Two promotable events: ev-fail (gate will raise) + ev-ok (gate succeeds).
+    for eid in ("ev-fail", "ev-ok"):
+        raw = tmp_path / f"{eid}.json"
+        raw.write_text(f'{{"id": "{eid}"}}', encoding="utf-8")
+        store.insert_event(
+            conn, event_id=eid, source="rss", ingested_ts=_now(), salience=0.9,
+            raw_path=str(raw), status="triaged", deduped_of=None,
+        )
+        store.insert_event_ticker(conn, event_id=eid, ticker="NVDA",
+                                  confidence=0.9)
+
+    def fake_create_role_llm(role, config):
+        is_local = (
+            config.get("llm_roles", {})
+            .get("triage_salience", {})
+            .get("provider") == "local"
+        )
+        if role == "triage_salience":
+            return _FakeClient(
+                "cand-A" if is_local else "api-quick",
+                _SALIENCE_LOCAL if is_local else _SALIENCE_API,
+            )
+        # alert_gate: local raises, api always passes
+        if is_local:
+            return _RaisingClient("cand-A")
+        return _FakeClient("api-quick", _GATE_PASS)
+
+    monkeypatch.setattr(
+        "tradingagents.llm_clients.factory.create_role_llm",
+        fake_create_role_llm,
+    )
+
+    cfg = {
+        "llm_roles": {
+            "triage_salience": {"provider": None, "model": None},
+            "alert_gate": {"provider": None, "model": None},
+        },
+        "alert_salience_threshold": 0.85,
+        "alert_ticker_confidence_threshold": 0.8,
+    }
+    rows = shadow_eval.replay(
+        conn, cfg=cfg, model="cand-A", limit=10,
+        local_base_url=None, confidence_threshold=0.9,
+    )
+
+    # Replay must complete (not raise) despite gate failures.
+    # Expected rows: 2 triage rows + 2 gate rows (one per promotable event).
+    # Gate rows for failing events have parse_ok=0.
+    stored = store.fetch_shadow_eval(conn, model_id="cand-A")
+    gate_rows = [r for r in stored if r["api_verdict"] is not None or r["local_verdict"] is not None
+                 or (r["api_salience"] is None and r["parse_ok"] == 0)]
+    # At least one gate row with parse_ok=0 (the failing event).
+    parse_fail_rows = [r for r in stored if r["parse_ok"] == 0]
+    assert len(parse_fail_rows) >= 1, "expected at least one parse_ok=0 gate row"
+
+    # Both events must have been processed: 2 triage rows at minimum.
+    triage_rows = [r for r in stored if r["api_salience"] is not None]
+    assert len(triage_rows) == 2, "both events must have triage rows"
+
+    # A stderr note must have been emitted for the failure.
+    err = capsys.readouterr().err
+    assert "simulated gate API failure" in err or "gate" in err.lower() or "error" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Issue 2: per-event progress on stderr
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_replay_emits_progress_to_stderr(tmp_path, monkeypatch, capsys):
+    """replay() must print one progress line per event to stderr (flushed).
+    We only do a loose check: stderr is non-empty and contains the event_id.
+    """
+    db = str(tmp_path / "iic.db")
+    conn = connect(db)
+    raw = tmp_path / "prog-ev.json"
+    raw.write_text('{"x": 1}', encoding="utf-8")
+    store.insert_event(
+        conn, event_id="prog-ev", source="rss", ingested_ts=_now(),
+        salience=0.2, raw_path=str(raw), status="triaged", deduped_of=None,
+    )
+
+    monkeypatch.setattr(
+        "tradingagents.llm_clients.factory.create_role_llm",
+        lambda role, config: _FakeClient("any", _SALIENCE_API),
+    )
+    cfg = {
+        "llm_roles": {
+            "triage_salience": {"provider": None, "model": None},
+            "alert_gate": {"provider": None, "model": None},
+        },
+        "alert_salience_threshold": 0.85,
+        "alert_ticker_confidence_threshold": 0.8,
+    }
+    shadow_eval.replay(
+        conn, cfg=cfg, model="cand-A", limit=10,
+        local_base_url=None, confidence_threshold=0.9,
+    )
+    err = capsys.readouterr().err
+    assert "prog-ev" in err, f"expected event_id in stderr progress; got: {err!r}"
+
+
+# ---------------------------------------------------------------------------
+# Issue 3: --report-only --limit N returns NEWEST N rows
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_main_report_only_limit_takes_newest_rows(tmp_path, capsys):
+    """When --report-only --limit N is given, the NEWEST N rows are reported,
+    not the oldest N.  We seed 6 rows for model cand-X: first 4 with
+    latency=100 (old run), then 2 with latency=999 (new run).
+    --limit 2 must report on the 2 newest rows (latency=999 rows), not the
+    oldest 2.
+    """
+    db = str(tmp_path / "iic.db")
+    conn = connect(db)
+    ts = _now()
+    for i in range(4):
+        store.insert_shadow_eval(
+            conn, event_id=f"old-{i}", model_id="cand-X",
+            api_salience=0.5, local_salience=0.5, salience_delta=0.0,
+            api_verdict=None, local_verdict=None,
+            parse_ok=True, latency_ms=100, created_ts=ts,
+        )
+    for i in range(2):
+        store.insert_shadow_eval(
+            conn, event_id=f"new-{i}", model_id="cand-X",
+            api_salience=0.5, local_salience=0.5, salience_delta=0.0,
+            api_verdict=None, local_verdict=None,
+            parse_ok=True, latency_ms=999, created_ts=ts,
+        )
+    conn.close()
+
+    rc = shadow_eval.main(
+        ["--model", "cand-X", "--db", db, "--report-only", "--limit", "2"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # rows: 2 (the 2 newest)
+    assert "rows: 2" in out
+    # p50 of [999, 999] = 999.0ms — proves newest rows were used
+    assert "999.0ms" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue 4: api_failures in compute_report and format_report
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_compute_report_api_failures_counted():
+    """api_salience=None with local_salience present → API failure for that
+    row.  compute_report must count and surface api_failures."""
+    rows = [
+        _row(event_id="e1", api_salience=0.9, local_salience=0.8,
+             parse_ok=1, latency_ms=100),
+        # api_salience is None → API failure on this row
+        _row(event_id="e2", api_salience=None, local_salience=0.5,
+             parse_ok=1, latency_ms=200),
+        _row(event_id="e3", api_salience=0.7, local_salience=0.6,
+             parse_ok=1, latency_ms=300),
+    ]
+    report = shadow_eval.compute_report(rows)
+    assert report["parse"]["api_failures"] == 1
+
+
+@pytest.mark.unit
+def test_compute_report_api_failures_zero():
+    """All api_salience present → api_failures == 0."""
+    rows = [
+        _row(event_id="e1", api_salience=0.9, local_salience=0.8,
+             parse_ok=1, latency_ms=100),
+    ]
+    report = shadow_eval.compute_report(rows)
+    assert report["parse"]["api_failures"] == 0
+
+
+@pytest.mark.unit
+def test_format_report_includes_api_failures():
+    """format_report must mention api_failures somewhere in its output."""
+    rows = [
+        _row(event_id="e1", api_salience=None, local_salience=0.8,
+             parse_ok=1, latency_ms=100),
+    ]
+    report = shadow_eval.compute_report(rows)
+    text = shadow_eval.format_report(report)
+    assert "api_fail" in text.lower() or "api failures" in text.lower()
