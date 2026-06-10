@@ -147,8 +147,15 @@ def run_once(
 
 
 def main(config: Optional[dict] = None) -> None:
-    """systemd entry point. Defensive: never exits except on KeyboardInterrupt."""
+    """systemd entry point. Defensive: never exits except on KeyboardInterrupt
+    or a failed startup probe with fallback="none" (D5 — refuse to start)."""
     from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.llm_clients.availability import (
+        PROMOTER_FAILURE_COUNTER, PROMOTER_FALLBACK_BUDGET,
+        TRANSPORT_EXCEPTIONS, AvailabilityCounter, DailyFallbackBudget,
+        LocalEndpointUnavailable, resolve_role_llm_global,
+        resolve_role_llm_with_fallback,
+    )
     cfg = dict(DEFAULT_CONFIG)
     if config:
         cfg.update(config)
@@ -165,14 +172,54 @@ def main(config: Optional[dict] = None) -> None:
 
     gate_enabled = cfg["alert_approval_gate_enabled"]
     secretary = None
+    alert_evaluator = None
+
+    # D5 availability state (Task 15). The failure counter is persisted via
+    # ops_counters for the soak gate (Task 16) and self-alert seam (Task 17).
+    role_cfg = cfg.get("llm_roles", {}).get("alert_gate", {}) or {}
+    fallback_mode = (role_cfg.get("fallback") or "none").lower()
+    fallback_threshold = int(role_cfg.get("fallback_threshold", 3))
+    primary_is_local = (
+        (role_cfg.get("provider") or cfg.get("llm_provider") or "").lower()
+        == "local"
+    )
+    avail_counter = AvailabilityCounter(
+        name=PROMOTER_FAILURE_COUNTER, conn=conn)
+    fallback_budget = DailyFallbackBudget(
+        name=PROMOTER_FALLBACK_BUDGET,
+        max_per_day=int(role_cfg.get("fallback_daily_budget", 500)),
+        conn=conn,
+    )
+    # Mutable holder so the loop's fallback engagement can swap the evaluator
+    # LLM for subsequent cycles without rebuilding the closures.
+    llm_state: dict = {"llm": None, "used_fallback": False, "model": None}
+
     if gate_enabled:
-        from tradingagents.llm_clients.factory import create_role_llm
         from tradingagents.orchestrator.alert_evaluator import evaluate_alert_candidate
         from tradingagents.secretary.service import Secretary
-        llm = create_role_llm("alert_gate", cfg).get_llm()
-        secretary = Secretary(conn=conn, data_dir=cfg["iic_data_dir"], llm=llm)
+        # Eager startup probe (only when the role resolves to provider='local'):
+        # fallback="none" → a dead endpoint REFUSES to start (raise);
+        # fallback="api"  → re-resolve to the global provider (logged,
+        # budget-bounded per call below). Resolved endpoint + model identity
+        # is logged inside resolve_role_llm_with_fallback.
+        client, used_fallback = resolve_role_llm_with_fallback(
+            "alert_gate", cfg)
+        llm_state["llm"] = client.get_llm()
+        llm_state["used_fallback"] = used_fallback
+        llm_state["model"] = client.model
+        secretary = Secretary(conn=conn, data_dir=cfg["iic_data_dir"],
+                              llm=llm_state["llm"])
 
         def alert_evaluator(event_id, tickers):
+            # Each call routed through the API fallback burns the hard daily
+            # budget; when exhausted, degrade back to skipping — the raise is
+            # caught by the cycle-skip handler in the loop below and counted.
+            if (llm_state["used_fallback"]
+                    and not fallback_budget.try_consume()):
+                raise LocalEndpointUnavailable(
+                    f"fallback daily budget exhausted for role alert_gate "
+                    f"(max={fallback_budget.max_per_day}/day)"
+                )
             ev = store.get_event(conn, event_id=event_id)
             event_text = ""
             if ev is not None and ev["raw_path"]:
@@ -182,14 +229,19 @@ def main(config: Optional[dict] = None) -> None:
                     event_text = p.read_text(
                         encoding="utf-8", errors="replace"
                     )
-            return evaluate_alert_candidate(
-                llm=llm,
+            # NOTE: transport errors (openai.APIConnectionError & friends)
+            # PROPAGATE out of evaluate_alert_candidate — its except tuple is
+            # narrow (json/validation only; in its telemetry, latency_ms is
+            # None ⇔ invoke itself raised, i.e. endpoint vs parse failure).
+            # The loop below catches TRANSPORT_EXCEPTIONS and skips the cycle.
+            evaluation = evaluate_alert_candidate(
+                llm=llm_state["llm"],
                 event_text=event_text,
                 tickers=list(tickers),
                 min_score=cfg.get("alert_quality_threshold", 0.80),
             )
-    else:
-        alert_evaluator = None
+            avail_counter.record_success()
+            return evaluation
 
     log.info("promoter starting: poll=%ss cooldown=%sm guards: bp=%s rate=%s",
              cfg["promoter_poll_interval_s"], cfg["alert_cooldown_min"],
@@ -213,6 +265,29 @@ def main(config: Optional[dict] = None) -> None:
         except KeyboardInterrupt:
             log.info("promoter shutting down on KeyboardInterrupt")
             raise
+        except TRANSPORT_EXCEPTIONS as e:
+            # D5 (Task 15): the gate LLM endpoint is unavailable — degrade
+            # LOUDLY: count + log + SKIP the cycle (no partial writes; the
+            # evaluator raise happens before any insert for that event).
+            # TRANSPORT_EXCEPTIONS is a deliberately NARROW tuple — genuine
+            # bugs still fall through to the broad handler below.
+            avail_counter.record_failure(reason=f"{type(e).__name__}: {e}")
+            log.warning(
+                "promoter cycle skipped: alert_gate LLM endpoint failure "
+                "(%s: %s) model=%s consecutive=%d total=%d",
+                type(e).__name__, e, llm_state.get("model"),
+                avail_counter.consecutive, avail_counter.total,
+            )
+            if (gate_enabled and fallback_mode == "api" and primary_is_local
+                    and not llm_state["used_fallback"]
+                    and avail_counter.consecutive >= fallback_threshold):
+                # Deliberate fallback: second role resolution to the GLOBAL
+                # API provider for subsequent cycles (sticky for the process
+                # lifetime; every call budget-bounded in alert_evaluator).
+                fb = resolve_role_llm_global("alert_gate", cfg)
+                llm_state["llm"] = fb.get_llm()
+                llm_state["model"] = fb.model
+                llm_state["used_fallback"] = True
         except Exception:
             log.exception("promoter loop failure; sleeping 5s and continuing")
             time.sleep(5)

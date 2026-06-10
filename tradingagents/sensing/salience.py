@@ -225,20 +225,32 @@ class SalienceScorer:
 
         prompt = build_salience_prompt(env=env, watchlist=watchlist,
                                        macro_context=macro_context)
+        # Failure handling (Task 15 / D5): don't stall the pipeline — return a
+        # deferred sentinel.  DO NOT cache the failure: a transient LLM error
+        # or out-of-range salience should not poison the cache for 24h.
+        # salience=0.0 guarantees a deferred result can never cross the
+        # promote threshold (triage additionally persists deferred events with
+        # salience=NULL and salience_source='deferred', and skips dedupe
+        # recording so a redelivery is re-scored).  The reason string tags the
+        # failure class — 'llm_error' (endpoint/transport/SDK failure) vs
+        # 'parse_error' (model answered but the JSON was unusable) — so the
+        # availability counter log lines can distinguish endpoint health
+        # problems from model-quality problems.
         try:
             raw = await self._invoke_llm(prompt)
+        except Exception as e:
+            return SalienceResult(
+                salience=0.0, matched_tickers=[], mentioned_tickers=[],
+                reason=f"deferred: llm_error: {type(e).__name__}",
+                source="deferred",
+            )
+        try:
             result = _parse(raw)
             result.source = "llm"
         except Exception as e:
-            # Don't stall the pipeline — return a deferred sentinel.
-            # DO NOT cache the failure: a transient LLM error or out-of-range
-            # salience should not poison the cache for 24h.
-            # salience=0.0 guarantees a deferred event can never cross the
-            # promote threshold (old fallback was 0.1).
-            # (Task 15 will add full deferred-queue handling.)
             return SalienceResult(
                 salience=0.0, matched_tickers=[], mentioned_tickers=[],
-                reason=f"deferred: {type(e).__name__}",
+                reason=f"deferred: parse_error: {type(e).__name__}",
                 source="deferred",
             )
 

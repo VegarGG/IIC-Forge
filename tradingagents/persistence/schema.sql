@@ -360,3 +360,36 @@ CREATE TABLE IF NOT EXISTS shadow_eval (
     created_ts      TEXT    NOT NULL                -- UTC ISO-8601 string
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_eval_model ON shadow_eval(model_id);
+
+-- ============================================================
+-- Task 15: availability policy (D5) — deferred salience + ops counters
+-- ============================================================
+-- events.salience_source records HOW the salience value was produced:
+--   'llm'      — scored by a live model call
+--   'cache'    — served from the Redis salience cache
+--   'deferred' — the scorer could not produce a score (LLM endpoint or parse
+--                failure); salience is NULL (un-scored — can never cross the
+--                promote threshold, which uses `salience >= ?`) and dedupe
+--                fingerprints/embeddings are deliberately NOT recorded so a
+--                redelivery of the same payload is RE-SCORED instead of being
+--                swallowed as a duplicate.
+-- NULL for rows written before this migration and for duplicate rows.
+-- Same idempotent-ALTER pattern as above — db.py swallows the "duplicate
+-- column name" error on re-run; no IF NOT EXISTS (unsupported on ALTER TABLE).
+ALTER TABLE events ADD COLUMN salience_source TEXT;
+
+-- Small persistent ops counters (name → monotonically increasing value),
+-- written by the availability layer (AvailabilityCounter / DailyFallbackBudget
+-- in tradingagents/llm_clients/availability.py).  Persisted — rather than
+-- in-memory only — because the L3 soak gate must query "failure counter = 0"
+-- across daemon restarts (an in-memory counter dies with the process).
+-- Names in use:
+--   'triage_llm_failures', 'promoter_llm_failures'
+--       — total LLM-availability failures per daemon (monotonic);
+--   'triage_fallback_calls:<YYYY-MM-DD>', 'promoter_fallback_calls:<YYYY-MM-DD>'
+--       — per-UTC-day fallback API call counts (hard daily budget enforcement).
+CREATE TABLE IF NOT EXISTS ops_counters (
+    name       TEXT PRIMARY KEY,
+    value      INTEGER NOT NULL DEFAULT 0,
+    updated_ts TEXT NOT NULL
+);

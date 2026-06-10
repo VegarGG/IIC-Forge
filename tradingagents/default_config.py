@@ -298,13 +298,23 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     # Applied in _apply_nested_env_overrides (cannot use flat _ENV_OVERRIDES for
     # nested keys). LOCAL_LLM_BASE_URL is resolved per-request in
     # openai_client._resolve_provider_base_url and is NOT mirrored here.
+    # fallback (Task 15 / D5): "none" (default — a dead local endpoint refuses
+    # to start / skips cycles) or "api" (after fallback_threshold consecutive
+    # runtime failures — or a failed startup probe — the role re-resolves to
+    # the GLOBAL provider, hard-bounded by fallback_daily_budget calls per UTC
+    # day). The threshold/budget keys only matter when fallback="api", so the
+    # all-None production-default behavior is unchanged.
     "llm_roles": {
         "triage_salience": {"provider": None, "model": None, "base_url": None,
                             "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-                            "fallback": "none"},
+                            "fallback": "none",
+                            "fallback_threshold": 3,
+                            "fallback_daily_budget": 500},
         "alert_gate":      {"provider": None, "model": None, "base_url": None,
                             "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
-                            "fallback": "none"},
+                            "fallback": "none",
+                            "fallback_threshold": 3,
+                            "fallback_daily_budget": 500},
     },
     "refinement": {
         "max_depth": 3,

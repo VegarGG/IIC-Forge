@@ -17,9 +17,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Sequence
 
 import redis.asyncio as aioredis
+
+if TYPE_CHECKING:  # import-light: availability pulls in openai/httpx
+    from tradingagents.llm_clients.availability import AvailabilityCounter
 
 from tradingagents.persistence.store import (
     insert_event, insert_event_ticker,
@@ -94,6 +97,7 @@ class Triage:
         confidence_threshold: float = 0.8,
         salience_cache_ttl_seconds: int = 86400,
         ttl_days: int = 7,
+        availability_counter: "Optional[AvailabilityCounter]" = None,
     ) -> None:
         self._conn = conn
         self._redis = redis
@@ -127,6 +131,9 @@ class Triage:
         self._salience_threshold = salience_threshold
         self._confidence_threshold = confidence_threshold
         self._ttl_days = ttl_days
+        # D5 (Task 15): failure counter bumped whenever the scorer defers.
+        # Optional so unit tests / callers without availability wiring work.
+        self._availability_counter = availability_counter
         # In-process cached active watchlist; refreshed by the loop every N s.
         self._watchlist: list[str] = []
 
@@ -186,6 +193,38 @@ class Triage:
             env=env, watchlist=self._watchlist, macro_context="",
         )
 
+        # D5 (Task 15): the scorer could not produce a score (LLM endpoint or
+        # parse failure — score.reason carries which).  Degrade LOUDLY, not
+        # silently:
+        #   - count the failure (in-memory consecutive run + persistent total);
+        #   - persist the event so the backlog is observable, but with
+        #     salience=NULL (un-scored — `salience >= ?` in the promoter
+        #     candidate query excludes NULL, so it can never fire an alert)
+        #     and salience_source='deferred' so it is identifiable/retryable;
+        #   - deliberately SKIP stage-1/stage-2 dedupe RECORDING and ticker
+        #     promotion: a redelivery of the same payload must be RE-SCORED,
+        #     not swallowed as a duplicate of the unscored row.
+        if score.source == "deferred":
+            if self._availability_counter is not None:
+                self._availability_counter.record_failure(reason=score.reason)
+            ev_id = self._new_event_id()
+            insert_event(
+                self._conn, event_id=ev_id, source=env.source,
+                ingested_ts=env.ingested_ts, salience=None,
+                raw_path=self._canonical_raw_path(ev_id, env.raw_path),
+                status="triaged", deduped_of=None,
+                salience_source="deferred",
+            )
+            log.warning(
+                "salience deferred (%s): event %s recorded un-scored; dedupe "
+                "recording skipped so a redelivery re-scores", score.reason,
+                ev_id,
+            )
+            return TriageResult(event_id=ev_id, status="triaged",
+                                salience=None)
+        if self._availability_counter is not None:
+            self._availability_counter.record_success()
+
         # Resolve tickers: union(source_tags.tickers, mentioned_tickers) → validate.
         candidate = list(env.source_tags.get("tickers", [])) + \
                     [m.ticker for m in score.mentioned_tickers]
@@ -198,6 +237,7 @@ class Triage:
             ingested_ts=env.ingested_ts, salience=score.salience,
             raw_path=self._canonical_raw_path(ev_id, env.raw_path),
             status="triaged", deduped_of=None,
+            salience_source=score.source,   # 'llm' | 'cache'
         )
         # Record fingerprints + embedding (only on non-duplicates).
         await self._ds1.record(env, event_id=ev_id)
@@ -437,19 +477,70 @@ def _main() -> None:
     redis = make_redis(C["sensing_redis_url"])
     conn = connect(C["iic_db_path"])
 
-    # Build the LLM caller from the existing factory.
-    from tradingagents.llm_clients.factory import create_role_llm
+    # Build the LLM caller from the existing factory, applying the D5
+    # availability policy (Task 15): when the role resolves to
+    # provider='local', an eager /health + 1-token completion probe runs HERE
+    # so a dead endpoint fails FAST and LOUD at startup (mirroring the eager
+    # embedder load below).  fallback="none" → refuse to start;
+    # fallback="api" → re-resolve to the global API provider (logged,
+    # budget-bounded per call).
+    from tradingagents.llm_clients.availability import (
+        TRIAGE_FAILURE_COUNTER, TRIAGE_FALLBACK_BUDGET,
+        AvailabilityCounter, DailyFallbackBudget, LocalEndpointUnavailable,
+        resolve_role_llm_global, resolve_role_llm_with_fallback,
+    )
     from tradingagents.sensing.salience import maybe_bind_salience_schema
-    quick_client = create_role_llm("triage_salience", C)
+    quick_client, used_fallback = resolve_role_llm_with_fallback(
+        "triage_salience", C)
     llm = quick_client.get_llm()
     # Capability-gated: bind json_schema response_format only when the resolved
     # model supports grammar-constrained decoding (local GGUF / llama.cpp).
     # DeepSeek/MiniMax API models have supports_json_schema=False and are left
     # unbound so they never receive an unsupported parameter.
     llm = maybe_bind_salience_schema(llm, quick_client.model)
+
+    role_cfg = C.get("llm_roles", {}).get("triage_salience", {}) or {}
+    fallback_mode = (role_cfg.get("fallback") or "none").lower()
+    fallback_threshold = int(role_cfg.get("fallback_threshold", 3))
+    primary_is_local = (
+        (role_cfg.get("provider") or C.get("llm_provider") or "").lower()
+        == "local"
+    )
+    # Failure counter: bumped by process_one on every deferred score; read
+    # here to drive runtime fallback engagement, persisted via ops_counters
+    # for the soak gate (Task 16) and the self-alert seam (Task 17).
+    availability_counter = AvailabilityCounter(
+        name=TRIAGE_FAILURE_COUNTER, conn=conn)
+    fallback_budget = DailyFallbackBudget(
+        name=TRIAGE_FALLBACK_BUDGET,
+        max_per_day=int(role_cfg.get("fallback_daily_budget", 500)),
+        conn=conn,
+    )
+    # Mutable holder so runtime fallback engagement can swap the model for
+    # subsequent calls without rebuilding the closure.
+    _llm_state = {"llm": llm, "used_fallback": used_fallback}
+
     def call_llm(prompt: str) -> str:
+        # Runtime fallback (D5): after fallback_threshold CONSECUTIVE failures
+        # (counted by process_one when the scorer defers), re-resolve this
+        # role to the global API provider.  Engagement is sticky for the
+        # process lifetime; every fallback call burns the hard daily budget,
+        # and when it is exhausted the raise below makes the scorer defer —
+        # degradation stays loud and counted, never silent.
+        if (fallback_mode == "api" and primary_is_local
+                and not _llm_state["used_fallback"]
+                and availability_counter.consecutive >= fallback_threshold):
+            fb = resolve_role_llm_global("triage_salience", C)
+            _llm_state["llm"] = maybe_bind_salience_schema(
+                fb.get_llm(), fb.model)
+            _llm_state["used_fallback"] = True
+        if _llm_state["used_fallback"] and not fallback_budget.try_consume():
+            raise LocalEndpointUnavailable(
+                f"fallback daily budget exhausted for role triage_salience "
+                f"(max={fallback_budget.max_per_day}/day)"
+            )
         # LangChain chat models expose .invoke for str-or-message input.
-        out = llm.invoke(prompt)
+        out = _llm_state["llm"].invoke(prompt)
         return getattr(out, "content", str(out))
 
     # Eagerly load the embedder model so a missing dep / failed download
@@ -474,6 +565,7 @@ def _main() -> None:
         confidence_threshold=C["sensing_watchlist_confidence_threshold"],
         salience_cache_ttl_seconds=C["sensing_salience_cache_ttl_seconds"],
         ttl_days=C["sensing_watchlist_ttl_days"],
+        availability_counter=availability_counter,
     )
 
     async def run() -> None:

@@ -145,11 +145,20 @@ def insert_event(
     raw_path: Optional[str],
     status: str,
     deduped_of: Optional[str],
+    salience_source: Optional[str] = None,
 ) -> None:
+    """Insert one events row.
+
+    ``salience_source`` (Task 15): 'llm' | 'cache' | 'deferred' | None.
+    'deferred' marks an un-scored event (salience must be NULL) written when
+    the salience LLM call failed — identifiable/retryable, never promotable.
+    """
     conn.execute(
         "INSERT INTO events (event_id, source, ingested_ts, salience, "
-        "raw_path, deduped_of, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (event_id, source, ingested_ts, salience, raw_path, deduped_of, status),
+        "raw_path, deduped_of, status, salience_source) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (event_id, source, ingested_ts, salience, raw_path, deduped_of,
+         status, salience_source),
     )
     conn.commit()
 
@@ -691,3 +700,36 @@ def fetch_shadow_eval(
 
     rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
+
+
+# --------------------------------------------------------------------
+# Task 15 helpers — ops_counters (availability failure counters / budgets)
+# --------------------------------------------------------------------
+# Persistent named counters consumed by the D5 availability layer
+# (tradingagents/llm_clients/availability.py) and read by the L3 soak gate
+# ("failure counter = 0" must be queryable across daemon restarts) and the
+# Task 17 endpoint-down self-alert.  Counter names in use are documented on
+# the ops_counters table in schema.sql.
+
+def bump_ops_counter(
+    conn: sqlite3.Connection, *, name: str, delta: int = 1
+) -> int:
+    """Atomically add ``delta`` to counter ``name`` (creating it at ``delta``)
+    and return the new value."""
+    conn.execute(
+        "INSERT INTO ops_counters (name, value, updated_ts) VALUES (?, ?, ?) "
+        "ON CONFLICT(name) DO UPDATE SET "
+        "value = value + excluded.value, "
+        "updated_ts = excluded.updated_ts",
+        (name, delta, _now_iso()),
+    )
+    conn.commit()
+    return get_ops_counter(conn, name=name)
+
+
+def get_ops_counter(conn: sqlite3.Connection, *, name: str) -> int:
+    """Current value of counter ``name``; 0 when the counter does not exist."""
+    row = conn.execute(
+        "SELECT value FROM ops_counters WHERE name = ?", (name,)
+    ).fetchone()
+    return int(row["value"]) if row is not None else 0
