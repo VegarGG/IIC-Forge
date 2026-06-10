@@ -1,3 +1,5 @@
+import copy
+import warnings
 from typing import Any, Dict, Optional
 
 from .base_client import BaseLLMClient
@@ -101,15 +103,30 @@ def create_role_llm(role: str, config: Dict[str, Any]) -> BaseLLMClient:
     model = override.get("model") or config["quick_think_llm"]
     base_url = override.get("base_url") or config.get("backend_url")
 
+    # Warn when a role pins the provider but leaves model unset: the global
+    # quick_think_llm is used as a fallback, which may not exist on the
+    # overridden provider — a common misconfiguration footgun.
+    if override.get("provider") and not override.get("model"):
+        warnings.warn(
+            f"Role '{role}' overrides provider to '{provider}' but model falls "
+            f"back to global quick_think_llm '{model}', which may not exist on "
+            f"that provider.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     # Only forward extra_body when truthy so that non-local providers that do
     # not understand the key are not affected.  OpenAI-compatible clients
     # forward it via _PASSTHROUGH_KWARGS; non-compatible clients (Anthropic,
     # Google, Azure) store it in self.kwargs but never iterate it, so they
-    # tolerate the kwarg silently.  The dict(...) copy ensures we never hand a
-    # mutable reference to the process-global config into the client.
+    # tolerate the kwarg silently.  Deep-copied so that no level of the role's
+    # extra_body (which may alias DEFAULT_CONFIG) is shared with the client;
+    # the config must remain immutable for the daemon's lifetime.
     extra_body = override.get("extra_body")
     kwargs = {}
     if extra_body:
-        kwargs["extra_body"] = dict(extra_body)
+        kwargs["extra_body"] = copy.deepcopy(extra_body)
 
-    return create_llm_client(provider=provider, model=model, base_url=base_url, **kwargs)
+    return create_llm_client(
+        provider=provider, model=model, base_url=base_url, **kwargs
+    )
