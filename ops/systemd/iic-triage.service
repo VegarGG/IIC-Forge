@@ -19,8 +19,9 @@ EnvironmentFile=/home/ziwei-huang/TradingAgents/TradingAgents/.env
 #   IIC_TRIAGE_LLM_PROVIDER=local
 #   IIC_TRIAGE_LLM_MODEL=<model-id matching what llama-server reports, e.g. qwen3.6-27b-q4_k_m>
 #
-# Revert: remove (or comment out) IIC_TRIAGE_LLM_PROVIDER — a model without a
-# provider is inert and the role falls back to the global llm_provider default.
+# Revert: remove (or comment out) ALL FOUR IIC_TRIAGE_* vars (both provider
+# and model). Leaving IIC_TRIAGE_LLM_MODEL set while unsetting the provider
+# yields provider=deepseek + model=qwen…, causing API model-not-found errors.
 # LOCAL_LLM_BASE_URL and LOCAL_LLM_API_KEY are safe to leave set; they are only
 # consumed when provider=local is active.
 # ─────────────────────────────────────────────────────────────────────────────

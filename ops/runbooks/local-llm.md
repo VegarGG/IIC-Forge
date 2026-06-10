@@ -96,8 +96,7 @@ four `IIC_*` vars are applied at startup in
 ### Activating
 
 ```bash
-# After editing .env:
-sudo systemctl daemon-reload
+# After editing .env (no daemon-reload needed — only unit-file changes require it):
 sudo systemctl restart iic-triage iic-promoter
 
 # Verify startup probe passed (look for "startup probe OK" in each unit's log):
@@ -186,14 +185,14 @@ promoter. Do not skip. Do not hot-swap and gate in parallel.
 **L0 contract tests** (unit-level, no live endpoint required):
 
 ```bash
-python -m pytest tests/llm_clients/test_local_contract.py \
+/home/ziwei-huang/miniconda3/bin/python -m pytest tests/llm_clients/test_local_contract.py \
                  tests/llm_clients/test_json_schema_binding.py -q
 ```
 
 **L2 shadow-eval harness** (requires the new endpoint to be live):
 
 ```bash
-python scripts/shadow_eval.py \
+/home/ziwei-huang/miniconda3/bin/python scripts/shadow_eval.py \
     --limit 500 \
     --model <new-model-id> \
     --persist-set
@@ -208,44 +207,60 @@ L2 acceptance thresholds (all must pass):
 | Cohen's κ | reported (no minimum, but record it) |
 | Parse failures | = 0 |
 | Local p95 latency | ≤ API p95 latency |
-| Shadow soak | 24 h (run `--soak-report` after the window) |
-
-```bash
-# After the 24h shadow soak:
-python scripts/f4_f5_exit_gate.py --soak-report --local-model-id <new-model-id>
-# Add --json for machine-readable output
-```
 
 Once both gates pass, restart the IIC daemons:
 
 ```bash
-sudo systemctl daemon-reload
 sudo systemctl start iic-triage iic-promoter
 ```
 
+### Post-restart monitoring (soak-report counters)
+
+`--soak-report` counters accrue only after the daemons have restarted on the
+new model. Check them during and after the monitoring window:
+
+```bash
+cd /home/ziwei-huang/IIC-Forge/IIC-Forge && \
+PYTHONPATH=. /home/ziwei-huang/miniconda3/bin/python scripts/f4_f5_exit_gate.py \
+    --soak-report --local-model-id <new-model-id>
+# Add --json for machine-readable output
+```
+
+**Initial model qualification (first-ever cutover):** run a full 24 h shadow
+soak before running the L2 replay gate. The soak-report is the acceptance
+record for this qualification step. Routine same-family quant swaps (e.g.
+`q4_k_m` → `q5_k_m`) use the L0 + L2 replay gate only; the 24 h shadow soak
+is replaced by post-restart monitoring.
+
 ---
 
-## 5. Revert (unset the two provider vars)
+## 5. Revert (unset all four IIC_* vars)
 
 The revert is a pure env unset — no code changes required.
 
-Remove (or comment out) the two provider vars from `.env`:
+Remove (or comment out) **all four** `IIC_*` vars from `.env`:
 
 ```bash
-# Remove or comment out:
+# Remove or comment out ALL FOUR:
 # IIC_TRIAGE_LLM_PROVIDER=local
+# IIC_TRIAGE_LLM_MODEL=<model-id>
 # IIC_ALERT_GATE_LLM_PROVIDER=local
+# IIC_ALERT_GATE_LLM_MODEL=<model-id>
 ```
 
-`LOCAL_LLM_BASE_URL`, `LOCAL_LLM_API_KEY`, `IIC_TRIAGE_LLM_MODEL`, and
-`IIC_ALERT_GATE_LLM_MODEL` are **safe to leave set** — a model entry without
-a provider override is inert and the role falls back to the global
-`llm_provider` default (currently `deepseek`).
+**Why all four?** `create_role_llm` resolves provider and model independently.
+Leaving `IIC_TRIAGE_LLM_MODEL` or `IIC_ALERT_GATE_LLM_MODEL` set while
+unsetting only the provider yields `provider=deepseek` + `model=qwen…`,
+which produces an API model-not-found error on every call. No warning fires
+for this combination (the RuntimeWarning covers only provider-without-model
+in the opposite direction).
+
+`LOCAL_LLM_BASE_URL` and `LOCAL_LLM_API_KEY` are **safe to leave set** —
+they are only consumed when `provider=local` is active.
 
 Then reload:
 
 ```bash
-sudo systemctl daemon-reload
 sudo systemctl restart iic-triage iic-promoter
 
 # Confirm roles resolved to the API provider:
@@ -260,7 +275,9 @@ journalctl -u iic-promoter -n 10 --no-pager | grep 'resolved:'
 ### Soak report
 
 ```bash
-python scripts/f4_f5_exit_gate.py --soak-report [--local-model-id <id>] [--json]
+cd /home/ziwei-huang/IIC-Forge/IIC-Forge && \
+PYTHONPATH=. /home/ziwei-huang/miniconda3/bin/python scripts/f4_f5_exit_gate.py \
+    --soak-report [--local-model-id <id>] [--json]
 ```
 
 ### Ops counters (failure / fallback budgets)
@@ -277,7 +294,7 @@ Relevant counter names:
 
 ```bash
 sqlite3 /home/ziwei-huang/.tradingagents/iic.db \
-    "SELECT name, value FROM ops_counters WHERE name LIKE '%llm%' ORDER BY name"
+    "SELECT name, value FROM ops_counters WHERE name LIKE '%llm%' OR name LIKE '%fallback%' ORDER BY name"
 ```
 
 ### Dashboard costs tab
@@ -294,8 +311,13 @@ fires a one-shot self-alert via:
 - **Telegram**: `IIC_TELEGRAM_BOT_TOKEN` + `telegram_bot` config (see
   `tradingagents/ops/self_alert.py`). The alert is sent once per outage and
   re-armed on the next successful LLM call.
-- **CRITICAL log**: always emitted regardless of Telegram config; visible via
-  `journalctl -u iic-triage -p crit` / `journalctl -u iic-promoter -p crit`.
+- **Log**: always emitted regardless of Telegram config; visible via:
+  ```bash
+  journalctl -u iic-triage --no-pager | grep 'SELF-ALERT'
+  journalctl -u iic-promoter --no-pager | grep 'SELF-ALERT'
+  ```
+  (Python logging does not emit sd-priority prefixes, so journald records
+  stderr at `info` priority; `-p crit` returns nothing.)
 
 The alert is debounced: one alert per outage, not one per failure. A
 recovered endpoint re-arms the latch so the next outage alerts again.
