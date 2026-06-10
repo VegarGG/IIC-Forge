@@ -5,7 +5,11 @@ post-cutover soak period:
 
 * ``local_gate_calls``       — alert_evaluations rows matching local_model_id
 * ``gate_parse_failures``    — local gate rows where parse_ok = 0
+                               (NULL rows excluded — counted as gate_parse_unknown)
+* ``gate_parse_unknown``     — local gate rows where parse_ok IS NULL
 * ``triage_events_scored``   — events with salience_source = 'llm'
+* ``triage_events_cached``   — events with salience_source = 'cache'
+* ``triage_events_total``    — scored + cached + deferred
 * ``triage_events_deferred`` — events with salience_source = 'deferred'
 * ``triage_llm_failures``    — ops_counter 'triage_llm_failures'
 * ``promoter_llm_failures``  — ops_counter 'promoter_llm_failures'
@@ -35,7 +39,7 @@ from tradingagents.llm_clients.availability import (
 
 def _seed_db(conn, *, local_model_id: str = "local-qwen3", day: str = "2026-06-10"):
     """Seed a minimal DB for the soak-report assertions."""
-    # events: 3 scored by LLM, 1 deferred (salience LLM failed)
+    # events: 3 scored by LLM, 1 cached, 1 deferred (salience LLM failed)
     for i in range(3):
         store.insert_event(
             conn,
@@ -48,6 +52,17 @@ def _seed_db(conn, *, local_model_id: str = "local-qwen3", day: str = "2026-06-1
             deduped_of=None,
             salience_source="llm",
         )
+    store.insert_event(
+        conn,
+        event_id="cache-evt-0",
+        source="rss",
+        ingested_ts=f"{day}T00:05:00+00:00",
+        salience=0.75,
+        raw_path=None,
+        status="triaged",
+        deduped_of=None,
+        salience_source="cache",
+    )
     store.insert_event(
         conn,
         event_id="defer-evt-0",
@@ -161,7 +176,10 @@ def test_soak_report_returns_all_keys(tmp_path):
     required_keys = {
         "local_gate_calls",
         "gate_parse_failures",
+        "gate_parse_unknown",
         "triage_events_scored",
+        "triage_events_cached",
+        "triage_events_total",
         "triage_events_deferred",
         "triage_llm_failures",
         "promoter_llm_failures",
@@ -211,9 +229,11 @@ def test_soak_report_triage_volumes(tmp_path):
 
     report = soak_report(conn, local_model_id="local-qwen3", day="2026-06-10")
 
-    # 3 events with salience_source='llm', 1 with 'deferred'
+    # 3 events with salience_source='llm', 1 with 'cache', 1 with 'deferred'
     assert report["triage_events_scored"] == 3
+    assert report["triage_events_cached"] == 1
     assert report["triage_events_deferred"] == 1
+    assert report["triage_events_total"] == 5  # 3 llm + 1 cache + 1 deferred
 
 
 @pytest.mark.unit
@@ -321,3 +341,152 @@ def test_soak_report_no_model_id_counts_all_evals(tmp_path):
 
     # Without a filter: 2 + 1 = 3 total alert_evaluations rows
     assert report["local_gate_calls"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: UTC day derivation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_soak_report_utc_today_derivation(tmp_path):
+    """soak_report(day=None) uses _utc_today() — UTC, not local time.
+
+    Seed a budget key keyed by the SAME UTC date that _utc_today() returns,
+    then call soak_report(day=None) and assert the counter is non-zero.
+    This proves the UTC-day code path produces the same key the budget uses.
+    """
+    from datetime import datetime, timezone
+    from scripts.f4_f5_exit_gate import soak_report, _utc_today
+    from tradingagents.llm_clients.availability import TRIAGE_FALLBACK_BUDGET
+
+    conn = connect(str(tmp_path / "iic.db"))
+    utc_day = _utc_today()
+
+    # Seed the budget counter under the UTC key
+    store.bump_ops_counter(conn, name=f"{TRIAGE_FALLBACK_BUDGET}:{utc_day}", delta=7)
+
+    report = soak_report(conn, day=None)
+
+    assert report["fallback_calls_today"]["triage"] == 7, (
+        f"Expected 7 fallback calls seeded for UTC day {utc_day!r}; "
+        f"got {report['fallback_calls_today']['triage']} — "
+        "possible UTC vs local date mismatch"
+    )
+
+
+@pytest.mark.unit
+def test_utc_today_format():
+    """_utc_today() returns a well-formed YYYY-MM-DD UTC date string."""
+    import re
+    from scripts.f4_f5_exit_gate import _utc_today
+    from datetime import datetime, timezone
+
+    result = _utc_today()
+
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", result), (
+        f"_utc_today() must return YYYY-MM-DD, got {result!r}"
+    )
+    # Must equal datetime.now(timezone.utc).date().isoformat() (not local date)
+    expected = datetime.now(timezone.utc).date().isoformat()
+    assert result == expected
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: NULL parse_ok excluded from failures; tracked as gate_parse_unknown
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_soak_report_null_parse_ok_not_counted_as_failure(tmp_path):
+    """NULL parse_ok rows (pre-telemetry) must not count as gate_parse_failures.
+
+    They should appear in gate_parse_unknown instead.
+    """
+    from scripts.f4_f5_exit_gate import soak_report
+
+    day = "2026-06-10"
+    conn = connect(str(tmp_path / "iic.db"))
+
+    # Insert an event for the evaluation to reference
+    store.insert_event(
+        conn,
+        event_id="pre-telem-evt-0",
+        source="rss",
+        ingested_ts=f"{day}T01:00:00+00:00",
+        salience=0.8,
+        raw_path=None,
+        status="triaged",
+        deduped_of=None,
+        salience_source="llm",
+    )
+    # Insert a pre-telemetry evaluation: parse_ok=None -> NULL in DB
+    store.insert_alert_evaluation(
+        conn,
+        event_id="pre-telem-evt-0",
+        tickers=["NVDA"],
+        decision="pass",
+        score=0.8,
+        payload={},
+        created_ts=f"{day}T01:00:30+00:00",
+        model_id="local-qwen3",
+        parse_ok=None,   # pre-telemetry row — NULL in DB
+        latency_ms=None,
+    )
+    # Also insert a real failure row so we can verify counts are distinct
+    store.insert_event(
+        conn,
+        event_id="fail-evt-0",
+        source="rss",
+        ingested_ts=f"{day}T01:01:00+00:00",
+        salience=0.5,
+        raw_path=None,
+        status="triaged",
+        deduped_of=None,
+        salience_source="llm",
+    )
+    store.insert_alert_evaluation(
+        conn,
+        event_id="fail-evt-0",
+        tickers=["TSLA"],
+        decision="pass",
+        score=0.5,
+        payload={},
+        created_ts=f"{day}T01:01:30+00:00",
+        model_id="local-qwen3",
+        parse_ok=False,  # real parse failure
+        latency_ms=200,
+    )
+
+    report = soak_report(conn, local_model_id="local-qwen3", day=day)
+
+    # Only the explicit 0 row counts as failure; NULL row does NOT
+    assert report["gate_parse_failures"] == 1, (
+        f"Expected 1 parse failure (parse_ok=0), got {report['gate_parse_failures']}"
+    )
+    assert report["gate_parse_unknown"] == 1, (
+        f"Expected 1 parse unknown (NULL), got {report['gate_parse_unknown']}"
+    )
+    assert report["local_gate_calls"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: triage_events_cached and triage_events_total present in report
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_soak_report_triage_cached_and_total(tmp_path):
+    """triage_events_cached and triage_events_total are correct denominators."""
+    from scripts.f4_f5_exit_gate import soak_report
+
+    conn = connect(str(tmp_path / "iic.db"))
+    _seed_db(conn)  # seeds 3 llm + 1 cache + 1 deferred events
+
+    report = soak_report(conn, local_model_id="local-qwen3", day="2026-06-10")
+
+    assert report["triage_events_cached"] == 1
+    assert report["triage_events_total"] == 5  # 3 + 1 + 1
+    # total must equal the sum of its parts
+    assert report["triage_events_total"] == (
+        report["triage_events_scored"]
+        + report["triage_events_cached"]
+        + report["triage_events_deferred"]
+    )

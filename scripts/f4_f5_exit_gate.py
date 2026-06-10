@@ -7,7 +7,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -257,6 +257,16 @@ def render_md(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _utc_today() -> str:
+    """Return today's date as an ISO-8601 string in UTC (YYYY-MM-DD).
+
+    Always uses UTC so the result agrees with DailyFallbackBudget keys, which
+    are also keyed by UTC date.  Using local time would cause a silent
+    under-read of fallback spend for several hours per day on UTC-offset hosts.
+    """
+    return datetime.now(timezone.utc).date().isoformat()
+
+
 def soak_report(
     conn: sqlite3.Connection,
     *,
@@ -271,6 +281,11 @@ def soak_report(
                                when None — use for a total-volume check when
                                local is the only gate model post-cutover)
       gate_parse_failures    — local gate evaluations where parse_ok = 0
+                               (NULL rows — pre-telemetry, no parse_ok column
+                               data — are excluded from failures and tracked
+                               separately as gate_parse_unknown)
+      gate_parse_unknown     — local gate evaluations where parse_ok IS NULL
+                               (pre-telemetry rows; not counted as failures)
       triage_events_scored   — events with salience_source = 'llm'
                                NOTE: this is the total triage-scored event count;
                                it cannot distinguish local vs API triage calls
@@ -280,6 +295,11 @@ def soak_report(
                                Interpret as: "events the triage LLM handled" —
                                which equals total LLM-scored events post-cutover
                                when the local model is the sole triage provider.
+      triage_events_cached   — events with salience_source = 'cache'
+                               (salience reused from cache; denominator for the
+                               L3 "tracking event rate" calculation)
+      triage_events_total    — triage_events_scored + triage_events_cached +
+                               triage_events_deferred (total triage-handled events)
       triage_events_deferred — events with salience_source = 'deferred'
                                (salience LLM failed; these are un-scored and
                                never promoted — should be 0 post-cutover)
@@ -295,7 +315,8 @@ def soak_report(
 
     Post-cutover healthy state:
       triage_llm_failures = 0, promoter_llm_failures = 0,
-      gate_parse_failures = 0, fallback_calls_today = {triage:0, promoter:0},
+      gate_parse_failures = 0, gate_parse_unknown = 0,
+      fallback_calls_today = {triage:0, promoter:0},
       costs.api_spend -> 0.
     """
     from tradingagents.dashboard.panels.costs import fetch_provider_split
@@ -307,7 +328,7 @@ def soak_report(
     )
     from tradingagents.persistence import store
 
-    today = day or date.today().isoformat()
+    today = day or _utc_today()
 
     # -- gate: local model call volume & parse failures ----------------------
     if local_model_id is not None:
@@ -321,9 +342,10 @@ def soak_report(
         ).fetchall()
 
     local_gate_calls = len(gate_rows)
-    gate_parse_failures = sum(
-        1 for r in gate_rows if not r["parse_ok"]
-    )
+    # NULL parse_ok rows are pre-telemetry rows; exclude from failures and
+    # track separately so unfiltered mode does not count old data as failures.
+    gate_parse_failures = sum(1 for r in gate_rows if r["parse_ok"] == 0)
+    gate_parse_unknown = sum(1 for r in gate_rows if r["parse_ok"] is None)
 
     # -- triage: event salience_source counts --------------------------------
     triage_events_scored = _row_count(
@@ -331,11 +353,17 @@ def soak_report(
             "SELECT COUNT(*) FROM events WHERE salience_source = 'llm'"
         ).fetchone()
     )
+    triage_events_cached = _row_count(
+        conn.execute(
+            "SELECT COUNT(*) FROM events WHERE salience_source = 'cache'"
+        ).fetchone()
+    )
     triage_events_deferred = _row_count(
         conn.execute(
             "SELECT COUNT(*) FROM events WHERE salience_source = 'deferred'"
         ).fetchone()
     )
+    triage_events_total = triage_events_scored + triage_events_cached + triage_events_deferred
 
     # -- ops_counters: failure totals ----------------------------------------
     triage_llm_failures = store.get_ops_counter(
@@ -359,7 +387,10 @@ def soak_report(
     return {
         "local_gate_calls": local_gate_calls,
         "gate_parse_failures": gate_parse_failures,
+        "gate_parse_unknown": gate_parse_unknown,
         "triage_events_scored": triage_events_scored,
+        "triage_events_cached": triage_events_cached,
+        "triage_events_total": triage_events_total,
         "triage_events_deferred": triage_events_deferred,
         "triage_llm_failures": triage_llm_failures,
         "promoter_llm_failures": promoter_llm_failures,
@@ -378,13 +409,16 @@ def render_soak_md(report: dict[str, Any]) -> str:
     lines = [
         "## Soak Report — Local Model Cutover Counters",
         "",
-        f"- local gate calls:          {report['local_gate_calls']}",
-        f"- gate parse failures:       {report['gate_parse_failures']}",
-        f"- triage events scored (llm):{report['triage_events_scored']}",
-        f"- triage events deferred:    {report['triage_events_deferred']}",
-        f"- triage LLM failures:       {report['triage_llm_failures']}",
-        f"- promoter LLM failures:     {report['promoter_llm_failures']}",
-        f"- fallback calls today:      triage={fb['triage']} promoter={fb['promoter']}",
+        f"- local gate calls:           {report['local_gate_calls']}",
+        f"- gate parse failures:        {report['gate_parse_failures']}",
+        f"- gate parse unknown (NULL):  {report['gate_parse_unknown']}",
+        f"- triage events scored (llm): {report['triage_events_scored']}",
+        f"- triage events cached:       {report['triage_events_cached']}",
+        f"- triage events total:        {report['triage_events_total']}",
+        f"- triage events deferred:     {report['triage_events_deferred']}",
+        f"- triage LLM failures:        {report['triage_llm_failures']}",
+        f"- promoter LLM failures:      {report['promoter_llm_failures']}",
+        f"- fallback calls today:       triage={fb['triage']} promoter={fb['promoter']}",
         "",
         "### Cost Split",
         f"- local calls:   {costs['local_calls']}",
@@ -417,6 +451,11 @@ def main() -> int:
         help="Day (YYYY-MM-DD) for fallback budget counters (default: today UTC).",
     )
     args = parser.parse_args()
+
+    if args.day is not None:
+        import re
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.day):
+            parser.error(f"--day must be in YYYY-MM-DD format, got: {args.day!r}")
 
     conn = connect(DEFAULT_CONFIG["iic_db_path"])
 
