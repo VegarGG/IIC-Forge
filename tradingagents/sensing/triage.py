@@ -46,6 +46,30 @@ class TriageResult:
     matched_tickers: Sequence[str] = ()
 
 
+def _open_cross_thread_conn(db_path: str) -> sqlite3.Connection:
+    """Open a second, ``check_same_thread=False`` connection to ``db_path``.
+
+    For sqlite objects that are created on one thread (the asyncio event-loop
+    thread) but used from another (an executor / ``asyncio.to_thread`` worker).
+    Callers MUST serialize access themselves — either a single worker thread
+    owns the connection (DedupeStage2's max_workers=1 executor) or every use
+    is wrapped in a lock (AvailabilityCounter / DailyFallbackBudget).  The
+    standard connect() helper is intentionally not used here to avoid changing
+    its global signature; no schema is applied (connect() already ran).
+    """
+    if not db_path:
+        raise ValueError(
+            "Triage requires a file-backed sqlite DB; "
+            ":memory:/temp DBs cannot be shared across connections"
+        )
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
 def _open_ds2_conn(db_path: str) -> sqlite3.Connection:
     """Open a sqlite connection for DedupeStage2's dedicated executor thread.
 
@@ -54,21 +78,11 @@ def _open_ds2_conn(db_path: str) -> sqlite3.Connection:
     exclusively inside a single-thread ThreadPoolExecutor worker.  We document
     this explicitly: the executor has max_workers=1, so only one thread ever
     touches this connection at a time — the usual sqlite thread-safety concern
-    (concurrent writes from multiple threads) cannot arise.  The standard
-    connect() helper is intentionally not used here to avoid changing its
-    global signature; we load sqlite_vec ourselves so KNN queries work.
+    (concurrent writes from multiple threads) cannot arise.  We load sqlite_vec
+    ourselves so KNN queries work.
     """
-    if not db_path:
-        raise ValueError(
-            "Triage requires a file-backed sqlite DB; "
-            ":memory:/temp DBs cannot be shared across connections"
-        )
     import sqlite_vec as _sqlite_vec
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    ds2_conn = sqlite3.connect(db_path, check_same_thread=False)
-    ds2_conn.row_factory = sqlite3.Row
-    ds2_conn.execute("PRAGMA busy_timeout=5000")
-    ds2_conn.execute("PRAGMA foreign_keys=ON")
+    ds2_conn = _open_cross_thread_conn(db_path)
     ds2_conn.enable_load_extension(True)
     _sqlite_vec.load(ds2_conn)
     ds2_conn.enable_load_extension(False)
@@ -141,12 +155,25 @@ class Triage:
     def _new_event_id(self) -> str:
         return uuid.uuid4().hex
 
-    def _canonical_raw_path(self, event_id: str, src_staging_path: str) -> str:
+    def _canonical_raw_path(self, event_id: str, src_staging_path: str,
+                            *, consume: bool = True) -> str:
+        """Canonicalize the staging raw file to ``events/<event_id>.json``.
+
+        ``consume=False`` COPIES instead of moving, leaving the staging file
+        in place.  The deferred path uses this: deferred events deliberately
+        skip dedupe recording so a redelivery is RE-SCORED — that redelivered
+        envelope still points at the staging path, which must therefore still
+        exist or the re-scored event ends up with raw_path="" (no raw text
+        for downstream compose).
+        """
         canonical_dir = Path(self._data_dir) / "events"
         canonical_dir.mkdir(parents=True, exist_ok=True)
         dst = canonical_dir / f"{event_id}.json"
         try:
-            shutil.move(src_staging_path, dst)
+            if consume:
+                shutil.move(src_staging_path, dst)
+            else:
+                shutil.copy2(src_staging_path, dst)
         except FileNotFoundError:
             # Staging file gone (test envelopes may not write one); leave path absent.
             return ""
@@ -211,7 +238,11 @@ class Triage:
             insert_event(
                 self._conn, event_id=ev_id, source=env.source,
                 ingested_ts=env.ingested_ts, salience=None,
-                raw_path=self._canonical_raw_path(ev_id, env.raw_path),
+                # consume=False: COPY the staging raw file rather than move
+                # it — the redelivery that re-scores this payload reads the
+                # same staging path and must still find its raw text.
+                raw_path=self._canonical_raw_path(ev_id, env.raw_path,
+                                                  consume=False),
                 status="triaged", deduped_of=None,
                 salience_source="deferred",
             )
@@ -222,7 +253,11 @@ class Triage:
             )
             return TriageResult(event_id=ev_id, status="triaged",
                                 salience=None)
-        if self._availability_counter is not None:
+        # Only a REAL LLM round-trip proves the endpoint is healthy.  Cache
+        # hits contact nothing, so they must leave the consecutive-failure
+        # run untouched — otherwise frequent cache hits during an outage
+        # would delay fallback engagement indefinitely.
+        if score.source == "llm" and self._availability_counter is not None:
             self._availability_counter.record_success()
 
         # Resolve tickers: union(source_tags.tickers, mentioned_tickers) → validate.
@@ -509,12 +544,24 @@ def _main() -> None:
     # Failure counter: bumped by process_one on every deferred score; read
     # here to drive runtime fallback engagement, persisted via ops_counters
     # for the soak gate (Task 16) and the self-alert seam (Task 17).
+    #
+    # DEDICATED cross-thread connection: call_llm runs inside
+    # asyncio.to_thread (SalienceScorer dispatches the sync LLM call to a
+    # worker thread), so fallback_budget.try_consume persists ops_counters
+    # OFF the main thread.  The main `conn` is main-thread-bound
+    # (check_same_thread=True) — using it there raises
+    # sqlite3.ProgrammingError, which the budget's except sqlite3.Error
+    # swallows, silently degrading persistence to in-memory.  Both classes
+    # hold their internal lock across EVERY access to this conn, so sharing
+    # it between the loop thread (record_failure) and to_thread workers
+    # (try_consume) is safe.
+    avail_conn = _open_cross_thread_conn(C["iic_db_path"])
     availability_counter = AvailabilityCounter(
-        name=TRIAGE_FAILURE_COUNTER, conn=conn)
+        name=TRIAGE_FAILURE_COUNTER, conn=avail_conn)
     fallback_budget = DailyFallbackBudget(
         name=TRIAGE_FALLBACK_BUDGET,
         max_per_day=int(role_cfg.get("fallback_daily_budget", 500)),
-        conn=conn,
+        conn=avail_conn,
     )
     # Mutable holder so runtime fallback engagement can swap the model for
     # subsequent calls without rebuilding the closure.

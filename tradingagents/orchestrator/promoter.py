@@ -288,6 +288,14 @@ def main(config: Optional[dict] = None) -> None:
                 llm_state["llm"] = fb.get_llm()
                 llm_state["model"] = fb.model
                 llm_state["used_fallback"] = True
+                # The Secretary composes with its own llm handle — swap it
+                # too, or compose_event_alert_light keeps hitting the dead
+                # local endpoint while gate evals burn the API budget (the
+                # event never alerts and is refetched every cycle).  The
+                # startup-fallback path already constructs Secretary with the
+                # fallback llm; only this runtime path needs the swap.
+                if secretary is not None:
+                    secretary.set_llm(llm_state["llm"])
         except Exception:
             log.exception("promoter loop failure; sleeping 5s and continuing")
             time.sleep(5)

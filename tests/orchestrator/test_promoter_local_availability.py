@@ -284,6 +284,65 @@ def test_runtime_fallback_api_engages_after_threshold(
 
 
 @pytest.mark.unit
+def test_runtime_fallback_engagement_swaps_secretary_llm(
+    tmp_path, caplog, monkeypatch, stub_local, stub_global
+):
+    """On runtime fallback engagement the Secretary's composing llm must swap
+    to the fallback too — otherwise gate evals burn the API budget while
+    compose keeps hitting the DEAD local endpoint, so the event never alerts
+    and is refetched every cycle until the daily budget bleeds out."""
+    import tradingagents.orchestrator.promoter as promoter_mod
+    import tradingagents.secretary.service as secretary_mod
+
+    caplog.set_level(logging.INFO)
+    captured: dict = {}
+    real_secretary = secretary_mod.Secretary
+
+    class _CapturingSecretary(real_secretary):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            captured["secretary"] = self
+            captured["startup_llm"] = kwargs["llm"]
+
+    monkeypatch.setattr(secretary_mod, "Secretary", _CapturingSecretary)
+
+    cfg = _cfg(
+        tmp_path,
+        gate_role=_gate_role(provider="local", model="local-gate-model",
+                             base_url=stub_local.url + "/v1", fallback="api",
+                             fallback_threshold=2, fallback_daily_budget=500),
+        llm_provider="deepseek",
+        quick_think_llm="deepseek-v4-flash",
+        backend_url=stub_global.url + "/v1",
+    )
+    _seed_candidate(cfg["iic_db_path"])
+
+    def on_call(n):
+        if n == 1:
+            _kill_server(stub_local)
+
+    # c1: local ok; c2: fail #1; c3: fail #2 → engage; c4: global serves.
+    monkeypatch.setattr(promoter_mod.time, "sleep",
+                        _SleepCtl(stop_after=4, on_call=on_call))
+
+    with pytest.raises(KeyboardInterrupt):
+        promoter_mod.main(config=cfg)
+
+    sec = captured["secretary"]
+    # The Secretary no longer holds the startup (dead local) llm...
+    assert sec._llm is not captured["startup_llm"]
+    # ...and a compose-style call through it reaches the GLOBAL provider.
+    # (Were it still the startup llm, this invoke would raise
+    # openai.APIConnectionError against the killed local stub.)
+    out = sec._llm.invoke("secretary-swap-probe")
+    assert getattr(out, "content", str(out)) == '{"ok": true}'
+    body = stub_global.last_request_json
+    assert body is not None
+    assert any("secretary-swap-probe" in str(m.get("content", ""))
+               for m in body["messages"])
+
+
+@pytest.mark.unit
 def test_runtime_fallback_budget_exhausted_reverts_to_skipping(
     tmp_path, caplog, monkeypatch, stub_local, stub_global
 ):

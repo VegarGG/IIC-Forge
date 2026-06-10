@@ -71,8 +71,9 @@ class LocalEndpointUnavailable(Exception):
 # sites that hit the endpoint without the SDK (e.g. raw probes).
 TRANSPORT_EXCEPTIONS: tuple = (
     LocalEndpointUnavailable,
-    openai.APIConnectionError,   # superclass of openai.APITimeoutError
-    openai.APITimeoutError,
+    # Covers timeouts too: openai.APITimeoutError is a subclass of
+    # APIConnectionError, so listing it separately would be redundant.
+    openai.APIConnectionError,
     openai.InternalServerError,  # HTTP 5xx — endpoint up but failing
     httpx.ConnectError,
     httpx.TimeoutException,
@@ -151,8 +152,10 @@ class AvailabilityCounter:
     ``last_reason``) drive the runtime fallback threshold; every failure is
     ALSO bumped into the ``ops_counters`` row named ``name`` so the soak
     report (Task 16) and the endpoint-down self-alert (Task 17) can read a
-    restart-surviving total.  Thread-safe (a lock guards the in-memory state;
-    sqlite serializes its own writes).
+    restart-surviving total.  Thread-safe: ``self._lock`` wraps the in-memory
+    state AND every ``self._conn`` access, so callers may hand this class a
+    shared ``check_same_thread=False`` connection that is also touched from
+    other threads (the triage daemon does — see ``triage._main``).
     """
 
     def __init__(self, *, name: str, conn: Optional[sqlite3.Connection] = None):
@@ -170,11 +173,14 @@ class AvailabilityCounter:
             self.total += 1
             self.last_failure_ts = datetime.now(timezone.utc).isoformat()
             self.last_reason = reason
-        if self._conn is not None:
-            try:
-                store.bump_ops_counter(self._conn, name=self.name)
-            except sqlite3.Error:
-                log.exception("failed to persist ops counter %s", self.name)
+            # Persist INSIDE the lock so all conn access is serialized — the
+            # conn may be shared with a DailyFallbackBudget consumed from
+            # asyncio.to_thread workers (triage's call_llm).
+            if self._conn is not None:
+                try:
+                    store.bump_ops_counter(self._conn, name=self.name)
+                except sqlite3.Error:
+                    log.exception("failed to persist ops counter %s", self.name)
 
     def record_success(self) -> None:
         """A successful LLM call: reset the consecutive run (total is monotonic)."""
@@ -188,6 +194,11 @@ class DailyFallbackBudget:
     Spend is persisted per day as ops_counter ``'<name>:<YYYY-MM-DD>'`` and
     re-read on the first consume of each day, so a daemon restart cannot
     reset an exhausted budget.
+
+    Thread-safe: ``try_consume`` holds ``self._lock`` across ALL ``_conn``
+    reads/writes, so a shared ``check_same_thread=False`` connection may be
+    consumed from worker threads (triage's call_llm runs inside
+    ``asyncio.to_thread``).
     """
 
     def __init__(self, *, name: str, max_per_day: int,

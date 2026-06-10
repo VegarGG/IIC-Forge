@@ -90,6 +90,17 @@ class Secretary:
         self._data_dir = Path(data_dir)
         self._llm = llm
 
+    def set_llm(self, llm: Any) -> None:
+        """Swap the composing LLM for all subsequent compose_* calls.
+
+        Used by the promoter's D5 runtime fallback engagement: when the gate
+        role re-resolves to the global API provider mid-process, the Secretary
+        must compose with the same fallback client — otherwise every compose
+        keeps hitting the dead local endpoint while gate evals burn the daily
+        API budget.
+        """
+        self._llm = llm
+
     # ----- Deep-dive (F1 scope) -----
     def compose_deep_dive(
         self,

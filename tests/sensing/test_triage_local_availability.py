@@ -17,7 +17,9 @@ import asyncio
 import json
 import logging
 import socket
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import fakeredis.aioredis
 import pytest
@@ -41,12 +43,13 @@ def _dead_base_url() -> str:
     return f"http://127.0.0.1:{port}/v1"
 
 
-def _env(text="Apple reports a big beat on Q3 revenue", source="polygon_news"):
+def _env(text="Apple reports a big beat on Q3 revenue", source="polygon_news",
+         raw_path="data/events/staging/x.json"):
     return Envelope(
         source=source,
         ingested_ts=datetime.now(timezone.utc).isoformat(),
         external_id=f"x:{text[:10]}",
-        text=text, source_tags={}, raw_path="data/events/staging/x.json",
+        text=text, source_tags={}, raw_path=raw_path,
     )
 
 
@@ -221,6 +224,90 @@ def test_main_fallback_api_routes_to_global_provider(
 
 
 # ---------------------------------------------------------------------------
+# Budget persistence from a WORKER THREAD (mirrors production exactly):
+# SalienceScorer dispatches the sync llm_call via asyncio.to_thread, so
+# try_consume's ops_counters read/write runs OFF the main thread. With a
+# main-thread-bound sqlite conn that raises sqlite3.ProgrammingError, which
+# the budget's `except sqlite3.Error` swallows — the budget silently degrades
+# to in-memory and the persisted spend stays 0 (restart-proofing broken).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_fallback_budget_persists_when_called_from_worker_thread(
+    monkeypatch, tmp_path, caplog, stub_server
+):
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    caplog.set_level(logging.INFO)
+    dead = _dead_base_url()
+    db_path = str(tmp_path / "iic.db")
+
+    import tradingagents.sensing.redis_client as redis_mod
+    monkeypatch.setattr(redis_mod, "make_redis", lambda url: object())
+    import tradingagents.sensing.embeddings as emb_mod
+
+    class _FakeEmbedder:
+        def load(self):
+            pass
+
+    monkeypatch.setattr(emb_mod, "SentenceTransformerEmbedder",
+                        lambda model: _FakeEmbedder())
+
+    captured = {}
+    import tradingagents.sensing.triage as triage_mod
+
+    class _FakeTriage:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(triage_mod, "Triage", _FakeTriage)
+    monkeypatch.setattr(asyncio, "run", lambda coro: coro.close())
+
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+    monkeypatch.setitem(DEFAULT_CONFIG, "iic_db_path", db_path)
+    monkeypatch.setitem(DEFAULT_CONFIG, "iic_data_dir", str(tmp_path / "data"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "llm_provider", "deepseek")
+    monkeypatch.setitem(DEFAULT_CONFIG, "quick_think_llm", "deepseek-v4-flash")
+    monkeypatch.setitem(DEFAULT_CONFIG, "backend_url", stub_server.url + "/v1")
+    monkeypatch.setitem(DEFAULT_CONFIG, "llm_roles", {
+        "triage_salience": _role_entry(
+            provider="local", model="test-local-model",
+            base_url=dead, fallback="api"),
+        "alert_gate": _role_entry(),
+    })
+
+    from tradingagents.sensing.triage import _main
+    _main()  # dead local + fallback="api" → starts with the fallback engaged
+
+    llm_call = captured.get("llm_call")
+    assert llm_call is not None, "Triage was not constructed with llm_call"
+
+    # Invoke the budget-consuming call FROM A WORKER THREAD, exactly as
+    # SalienceScorer._invoke_llm does via asyncio.to_thread in production.
+    result: dict = {}
+
+    def _worker():
+        try:
+            result["out"] = llm_call("ping")
+        except BaseException as e:  # surfaced below for a readable failure
+            result["err"] = e
+
+    th = threading.Thread(target=_worker, name="fake-to-thread-worker")
+    th.start()
+    th.join(timeout=30)
+    assert not th.is_alive(), "worker thread hung"
+    assert "err" not in result, f"llm_call raised in worker: {result.get('err')}"
+    assert result["out"] == '{"ok": true}'
+
+    # The consumed budget must be PERSISTED — read back via a fresh conn.
+    today = datetime.now(timezone.utc).date().isoformat()
+    check = connect(db_path)
+    assert store.get_ops_counter(
+        check, name=f"triage_fallback_calls:{today}") == 1
+
+
+# ---------------------------------------------------------------------------
 # Runtime fallback="api": call_llm re-resolves after N consecutive failures
 # ---------------------------------------------------------------------------
 
@@ -333,7 +420,16 @@ async def test_process_one_deferred_marks_event_skips_dedupe_and_counts(
     t = Triage(conn=conn, redis=r, embedder=MockEmbedder(), llm_call=flaky,
                data_dir=str(tmp_path / "data"), availability_counter=counter)
 
-    env = _env()
+    # A REAL staging raw file: the deferred path must not consume it, or the
+    # redelivery's re-scored event ends up with raw_path="" (no raw text for
+    # the secretary's compose).
+    staging = tmp_path / "staging" / "x.json"
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    staging.write_text(
+        json.dumps({"text": "Apple reports a big beat on Q3 revenue"}),
+        encoding="utf-8",
+    )
+    env = _env(raw_path=str(staging))
     res1 = await t.process_one(env)
 
     row = conn.execute(
@@ -342,6 +438,12 @@ async def test_process_one_deferred_marks_event_skips_dedupe_and_counts(
     # Un-scored (NULL), retryable — NOT 0.1, NOT a real score.
     assert row["salience"] is None
     assert row["salience_source"] == "deferred"
+    # The deferred row still references readable raw text...
+    assert row["raw_path"]
+    assert "Q3 revenue" in Path(row["raw_path"]).read_text(encoding="utf-8")
+    # ...and the staging file was NOT consumed: the redelivery (below) must
+    # be able to canonicalize its own copy of the raw text.
+    assert staging.exists()
 
     # Failure counter incremented, in memory AND persisted.
     assert counter.consecutive == 1
@@ -367,10 +469,62 @@ async def test_process_one_deferred_marks_event_skips_dedupe_and_counts(
     ).fetchone()
     assert row2["salience"] == pytest.approx(0.9)
     assert row2["salience_source"] == "llm"
+    # The re-scored event keeps its raw text: the deferred path above must
+    # not have consumed the staging file.
+    assert row2["raw_path"]
+    assert "Q3 revenue" in Path(row2["raw_path"]).read_text(encoding="utf-8")
 
     # Success resets the consecutive count; the total is monotonic.
     assert counter.consecutive == 0
     assert counter.total == 1
+
+
+# ---------------------------------------------------------------------------
+# Cache hits must NOT reset the consecutive-failure counter: a cached score
+# proves nothing about endpoint health, and frequent cache hits during an
+# outage would otherwise delay fallback engagement indefinitely.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+async def test_cache_hit_does_not_reset_consecutive_failures(conn, tmp_path):
+    from tradingagents.llm_clients.availability import AvailabilityCounter
+    from tradingagents.sensing.embeddings import MockEmbedder
+    from tradingagents.sensing.salience import (
+        MentionedTicker, SalienceResult, _cache_key, _serialize,
+    )
+    from tradingagents.sensing.triage import Triage
+
+    counter = AvailabilityCounter(name="triage_llm_failures", conn=conn)
+
+    def dead(_prompt):
+        raise AssertionError("a cache hit must not contact the LLM endpoint")
+
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    env = _env()
+    # Pre-seed the salience cache so score.source == "cache".
+    await r.set(_cache_key(env), _serialize(SalienceResult(
+        salience=0.9, matched_tickers=["AAPL"],
+        mentioned_tickers=[MentionedTicker(ticker="AAPL", confidence=0.95)],
+        reason="seeded",
+    )))
+
+    t = Triage(conn=conn, redis=r, embedder=MockEmbedder(), llm_call=dead,
+               data_dir=str(tmp_path / "data"), availability_counter=counter)
+
+    # Mid-outage: two consecutive failures already recorded.
+    counter.record_failure(reason="deferred: llm_error: ConnectionError")
+    counter.record_failure(reason="deferred: llm_error: ConnectionError")
+
+    res = await t.process_one(env)
+    assert res.status == "triaged"
+    row = conn.execute(
+        "SELECT * FROM events WHERE event_id = ?", (res.event_id,)
+    ).fetchone()
+    assert row["salience_source"] == "cache"
+
+    # No endpoint contact occurred → the consecutive run is UNCHANGED.
+    assert counter.consecutive == 2
+    assert counter.total == 2
 
 
 # ---------------------------------------------------------------------------
