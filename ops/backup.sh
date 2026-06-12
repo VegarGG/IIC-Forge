@@ -13,5 +13,10 @@ docker run --rm \
   -v "${OUT_DIR}:/backup" \
   alpine:3.20 \
   sh -c 'cp /redis/dump.rdb /backup/redis-dump.rdb'
-cp -a /srv/iic-forge/data "${OUT_DIR}/data"
+docker run --rm \
+  -v "${COMPOSE_PROJECT}_iic_data:/data" \
+  -v "${OUT_DIR}:/backup" \
+  --entrypoint python \
+  iic-forge:local \
+  -c "import sqlite3; s = sqlite3.connect('/data/iic.db'); d = sqlite3.connect('/backup/iic.db'); s.backup(d); d.close(); s.close()"
 echo "backup written to ${OUT_DIR}"

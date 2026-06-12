@@ -1,5 +1,7 @@
 # F3 24h Exit-Gate Runbook
 
+> **Historical phase gate.** This runbook documents the F3 exit-gate procedure, now superseded by the Compose-owned runtime. The current production launch/rollback procedure lives in `ops/runbooks/service-platform.md`. Commands below have been updated to the Compose runtime where they remain useful as smoke checks.
+
 The F3 exit gate is **one contiguous 24-hour run** with **no process restarts
 allowed**. A single `systemctl restart` of any sensing or triage unit during
 the window invalidates the gate. Plan the start time around your day.
@@ -17,16 +19,14 @@ fix before continuing.
 - [ ] All six adapters' env vars set: POLYGON_API_KEY, TELEGRAM_API_ID/HASH/SESSION (sensing), X_BEARER_TOKEN (if enabling x), FRED_API_KEY, RSS_FEEDS, GDELT_QUERY.
 - [ ] Telegram **sensing** session pre-authenticated: run the telegram adapter once standalone, complete any 2FA prompts, Ctrl+C, then start under Compose.
 - [ ] Redis running (`docker compose ps redis`), AOF on (`docker compose exec redis redis-cli CONFIG GET appendonly` → `yes`).
-- [ ] `tickers` table seeded: run `docker compose exec triage python -m cli.main forge sense reseed-tickers` → at least 8000 rows in `tickers` (or skip the gate and re-seed).
-- [ ] Baseline watchlist set: run `docker compose exec triage python -m cli.main forge watchlist add` for each of the user's standing tickers.
-- [ ] **Pre-soak**: each adapter individually for 1 hour. Each must produce ≥1 event with `NRestarts=0`:
+- [ ] `tickers` table seeded: run `docker compose run --rm triage python -m cli.main forge sense reseed-tickers` → at least 8000 rows in `tickers` (or skip the gate and re-seed).
+- [ ] Baseline watchlist set: run `docker compose run --rm triage python -m cli.main forge watchlist add` for each of the user's standing tickers.
+- [ ] **Pre-soak**: each adapter individually for 1 hour. Each must produce ≥1 event with no restarts:
   ```bash
-  for unit in iic-sense-{polygon,telegram,rss,gdelt,macro}; do
-      sudo systemctl start "$unit.service"
-      sleep 3600
-      systemctl show "$unit.service" --property=NRestarts  # expect NRestarts=0
-      sudo systemctl stop "$unit.service"
-  done
+  docker compose --profile sources up -d
+  sleep 3600
+  docker compose ps   # confirm all source services still running
+  docker compose --profile sources down
   ```
 - [ ] No pending reboot: `[ -f /var/run/reboot-required ] && echo NEEDS REBOOT || echo OK`.
 
@@ -36,38 +36,24 @@ fix before continuing.
 START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "START=$START" | tee /tmp/f3-gate-start.txt
 
-# Install the Compose supervisor and updated sensing/triage units.
-# Copy the runtime units that are not yet managed by Compose (sensing adapters
-# and triage run as host systemd services in F3; in F4+ they move into Compose).
-sudo cp ops/systemd/iic-forge-compose.service \
-        ops/systemd/iic-sense-*.service \
-        ops/systemd/iic-triage.service ops/systemd/iic-watchlist-sweep.service \
-        ops/systemd/iic-watchlist-sweep.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-
 cd /opt/iic-forge
-docker compose --profile runtime --profile sources --profile dashboard up -d redis
 
-# Confirm Redis is healthy before starting sensing/triage units.
+# Bring up Redis first and confirm it is healthy.
+docker compose up -d redis
 docker compose exec redis redis-cli ping
 
-# Enable all systemd units.
-sudo systemctl start \
-  iic-sense-polygon iic-sense-telegram iic-sense-rss \
-  iic-sense-gdelt iic-sense-macro \
-  iic-triage iic-watchlist-sweep.timer
+# Start all sensing adapters and the triage service via Compose profiles.
+docker compose --profile sources up -d
+docker compose --profile runtime up -d
 
-# x adapter is optional (per R-F3-3); enable only if X_BEARER_TOKEN works.
-# sudo systemctl start iic-sense-x
-
-# Confirm everything is "active (running)".
-systemctl status iic-sense-* iic-triage
+# Confirm everything is running.
+docker compose ps
 ```
 
 ## During the run
 
-- Do not touch any service unit. Do not run `systemctl restart`.
-- Spot-check log volume every few hours: `journalctl -u 'iic-sense-*' -f`.
+- Do not touch any service. Do not run `docker compose restart`.
+- Spot-check log volume every few hours: `docker compose logs -f`.
 - If a service dies, the gate is invalidated. Note the time; the evaluator
   will flag it. Fix the root cause before re-attempting.
 
@@ -86,8 +72,7 @@ Review the artifact:
 ## Tear-down
 
 ```bash
-sudo systemctl stop iic-sense-* iic-triage
-sudo systemctl stop iic-watchlist-sweep.timer
+docker compose --profile sources --profile runtime down
 sudo systemctl unmask unattended-upgrades.service
 kill %1  # systemd-inhibit
 ```
