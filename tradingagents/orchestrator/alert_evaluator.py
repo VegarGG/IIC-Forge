@@ -49,6 +49,40 @@ def record_alert_gate_llm_call(
     )
 
 
+def record_alert_gate_llm_error(
+    conn: sqlite3.Connection,
+    *,
+    event_id: Optional[str],
+    provider: str,
+    model_id: str,
+    base_url: Optional[str],
+    status: str,
+    fallback_mode: Optional[str],
+    fallback_used: bool,
+    parse_ok: Optional[bool] = None,
+    exc: BaseException,
+) -> int:
+    from tradingagents.llm_clients.ledger import record_llm_error
+
+    return record_llm_error(
+        conn,
+        role="alert_gate",
+        service_name="promoter",
+        provider=provider,
+        model_id=model_id,
+        base_url=base_url,
+        request_kind="structured",
+        linked_type="event",
+        linked_id=event_id,
+        status=status,
+        latency_ms=None,
+        parse_ok=parse_ok,
+        fallback_mode=fallback_mode,
+        fallback_used=fallback_used,
+        exc=exc,
+    )
+
+
 class AlertEvaluationPayload(BaseModel):
     decision: Literal["pass", "reject"]
     # Bounds enforced via field_validator rather than Field(ge/le) to prevent

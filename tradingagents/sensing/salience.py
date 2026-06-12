@@ -16,6 +16,7 @@ import hashlib
 import inspect
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -45,6 +46,7 @@ class SalienceResult:
     mentioned_tickers: List[MentionedTicker] = field(default_factory=list)
     reason: str = ""
     source: str = "llm"  # "llm" | "cache" | "deferred"
+    latency_ms: Optional[int] = None
 
 
 class _MentionedTickerSchema(BaseModel):
@@ -265,22 +267,28 @@ class SalienceScorer:
         # 'parse_error' (model answered but the JSON was unusable) — so the
         # availability counter log lines can distinguish endpoint health
         # problems from model-quality problems.
+        _t0 = time.perf_counter()
         try:
             raw = await self._invoke_llm(prompt)
+            _latency_ms: Optional[int] = int((time.perf_counter() - _t0) * 1000)
         except Exception as e:
+            _elapsed_ms = int((time.perf_counter() - _t0) * 1000)
             return SalienceResult(
                 salience=0.0, matched_tickers=[], mentioned_tickers=[],
                 reason=f"deferred: llm_error: {type(e).__name__}",
                 source="deferred",
+                latency_ms=_elapsed_ms,
             )
         try:
             result = _parse(raw)
             result.source = "llm"
+            result.latency_ms = _latency_ms
         except Exception as e:
             return SalienceResult(
                 salience=0.0, matched_tickers=[], mentioned_tickers=[],
                 reason=f"deferred: parse_error: {type(e).__name__}",
                 source="deferred",
+                latency_ms=_latency_ms,
             )
 
         await self._redis.setex(key, self._ttl, _serialize(result))

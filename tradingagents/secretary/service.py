@@ -7,12 +7,25 @@ Morning digest is stubbed — lands in F5.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+from tradingagents.persistence import store
+from tradingagents.secretary.analysis_runner import (
+    run_committee_analysis,
+    run_default_analysis,
+)
+from tradingagents.secretary.morning import run_one_ticker
+from tradingagents.secretary.synthesis import synthesize_brief
+
+log = logging.getLogger(__name__)
 
 
 def record_light_summary_llm_call(
@@ -43,16 +56,6 @@ def record_light_summary_llm_call(
         fallback_mode=fallback_mode,
         fallback_used=fallback_used,
     )
-
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-from tradingagents.persistence import store
-from tradingagents.secretary.analysis_runner import (
-    run_committee_analysis,
-    run_default_analysis,
-)
-from tradingagents.secretary.morning import run_one_ticker
-from tradingagents.secretary.synthesis import synthesize_brief
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _env = Environment(
@@ -420,10 +423,7 @@ class Secretary:
                 fallback_used=_fallback_used,
             )
         except Exception:
-            import logging as _logging
-            _logging.getLogger(__name__).exception(
-                "light_alert_summary ledger record failed (non-fatal)"
-            )
+            log.exception("light_alert_summary ledger record failed (non-fatal)")
 
         # NOTE: insert_brief + the per-ticker actions/suppressions are written
         # via store.* helpers that each commit individually, so this is not one

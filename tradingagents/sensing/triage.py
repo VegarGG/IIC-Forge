@@ -652,6 +652,11 @@ def _main() -> None:
     # Mutable holder so runtime fallback engagement can swap the model for
     # subsequent calls without rebuilding the closure.
     _llm_state = {"llm": llm, "used_fallback": used_fallback}
+    # Late-binding slot for _sync_scorer_identity (defined after t is built).
+    # call_llm is defined before t exists; the fallback branch fires only
+    # during the consume loop (after t and _sync_scorer_identity are both
+    # initialised), so reading _sync_scorer_holder[0] at that point is safe.
+    _sync_scorer_holder: list = [None]
 
     def call_llm(prompt: str) -> str:
         # Runtime fallback (D5): after fallback_threshold CONSECUTIVE failures
@@ -667,6 +672,12 @@ def _main() -> None:
             _llm_state["llm"] = maybe_bind_salience_schema(
                 fb.get_llm(), fb.model)
             _llm_state["used_fallback"] = True
+            # Update scorer identity to reflect the fallback client so that
+            # post-fallback triage_salience ledger rows report the API
+            # provider rather than the original local provider.
+            _sync_fn = _sync_scorer_holder[0]
+            if _sync_fn is not None:
+                _sync_fn(fb, fallback_used=True)
         if _llm_state["used_fallback"] and not fallback_budget.try_consume():
             raise LocalEndpointUnavailable(
                 f"fallback daily budget exhausted for role triage_salience "
@@ -710,12 +721,26 @@ def _main() -> None:
     # Guard: test doubles that monkeypatch triage_mod.Triage with a _FakeTriage
     # that lacks _scorer must not crash _main (the existing tests that do this
     # exercise startup probes, not scorer wiring).
-    if hasattr(t, "_scorer"):
-        t._scorer.provider = getattr(quick_client, "provider", "unknown")
-        t._scorer.model_id = quick_client.model
-        t._scorer.base_url = quick_client.base_url
+    # Helper: push the current client identity onto the scorer.  Called once
+    # at startup with fallback_used=used_fallback, and again from the fallback
+    # branch of call_llm (above) with fallback_used=True — via _sync_scorer_holder
+    # so the closure can reference the function even though it is defined after t.
+    def _sync_scorer_identity(client, *, fallback_used: bool = False) -> None:
+        if not hasattr(t, "_scorer"):
+            return
+        try:
+            prov = client.get_provider_name()
+        except Exception:
+            prov = getattr(client, "provider", "unknown")
+        t._scorer.provider = prov
+        t._scorer.model_id = client.model
+        t._scorer.base_url = getattr(client, "base_url", None)
         t._scorer.fallback_mode = fallback_mode
-        t._scorer.fallback_used = used_fallback
+        t._scorer.fallback_used = fallback_used
+
+    # Populate the late-binding slot so the call_llm fallback branch can invoke it.
+    _sync_scorer_holder[0] = _sync_scorer_identity
+    _sync_scorer_identity(quick_client, fallback_used=used_fallback)
 
     async def run() -> None:
         await ensure_consumer_group(
