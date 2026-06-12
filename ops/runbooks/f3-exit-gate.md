@@ -19,8 +19,8 @@ fix before continuing.
 - [ ] All six adapters' env vars set: POLYGON_API_KEY, TELEGRAM_API_ID/HASH/SESSION (sensing), X_BEARER_TOKEN (if enabling x), FRED_API_KEY, RSS_FEEDS, GDELT_QUERY.
 - [ ] Telegram **sensing** session pre-authenticated: run the telegram adapter once standalone, complete any 2FA prompts, Ctrl+C, then start under Compose.
 - [ ] Redis running (`docker compose ps redis`), AOF on (`docker compose exec redis redis-cli CONFIG GET appendonly` → `yes`).
-- [ ] `tickers` table seeded: run `docker compose run --rm triage python -m cli.main forge sense reseed-tickers` → at least 8000 rows in `tickers` (or skip the gate and re-seed).
-- [ ] Baseline watchlist set: run `docker compose run --rm triage python -m cli.main forge watchlist add` for each of the user's standing tickers.
+- [ ] `tickers` table seeded: run `docker compose run --rm --entrypoint python triage -m cli.main forge sense reseed-tickers` → at least 8000 rows in `tickers` (or skip the gate and re-seed).
+- [ ] Baseline watchlist set: run `docker compose run --rm --entrypoint python triage -m cli.main forge watchlist add` for each of the user's standing tickers.
 - [ ] **Pre-soak**: each adapter individually for 1 hour. Each must produce ≥1 event with no restarts:
   ```bash
   docker compose --profile sources up -d

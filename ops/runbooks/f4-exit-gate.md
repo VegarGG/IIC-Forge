@@ -24,19 +24,19 @@ Run sequentially. Any failure → fix before proceeding.
 
 2. **Watchlist non-empty.** The trigger rule requires `ticker ∈ watchlist`.
    ```bash
-   docker compose run --rm triage python -m cli.main forge watchlist list
+   docker compose run --rm --entrypoint python triage -m cli.main forge watchlist list
    ```
-   If empty: `docker compose run --rm triage python -m cli.main forge watchlist add AAPL` (and the user's other standing tickers).
+   If empty: `docker compose run --rm --entrypoint python triage -m cli.main forge watchlist add AAPL` (and the user's other standing tickers).
 
 3. **Tickers reference table seeded.**
    ```bash
-   docker compose run --rm triage python -c "import sqlite3; c = sqlite3.connect('/data/iic.db').cursor(); c.execute('SELECT COUNT(*) FROM tickers WHERE active=1'); print(c.fetchone()[0])"
+   docker compose run --rm --entrypoint python triage -c "import sqlite3; c = sqlite3.connect('/data/iic.db').cursor(); c.execute('SELECT COUNT(*) FROM tickers WHERE active=1'); print(c.fetchone()[0])"
    # Expect ≥ 8000
    ```
 
 4. **All cost guards confirmed OFF.** Gate observes the natural profile.
    ```bash
-   docker compose run --rm triage python - <<'EOF'
+   docker compose run --rm --entrypoint python triage - <<'EOF'
    from tradingagents.default_config import DEFAULT_CONFIG as C
    for k in ("cost_guard_enabled", "trigger_backpressure_enabled",
              "trigger_daily_rate_enabled", "daily_budget_enabled"):
@@ -105,7 +105,7 @@ Run sequentially. Any failure → fix before proceeding.
 
 Cited from spec §9:
 
-- `NRestarts == 0` for `iic-promoter` and `iic-worker` over the window. (Restart audit in the artifact.)
+- Restart counts for the `promoter`, `worker-action`, and `worker-deep` services must be 0 over the window (`docker compose ps` / `docker inspect --format '{{.RestartCount}}'`). (Restart audit in the artifact.)
 - Synthetic-smoke result: PASS (recorded in the artifact alongside the live signal).
 - Live SLA (tiered):
   - **≥ 3 briefs** during the window → `p95 latency ≤ 15 min`.
@@ -120,4 +120,4 @@ Cited from spec §9:
 | Worker restarts > 0 | OOM during persona fan-out, or an unhandled exception outside `drain_one`'s try/except | check `docker compose logs -f worker` for `Killed (out of memory)`; raise memory limits in `compose.yaml` if needed |
 | Latency p95 > 15 min | personas slow, LLM upstream lag, queue backlog | check per-job timing in the artifact; consider falling back to `quick_think_llm` for the synthesis call (open question #2 in the spec) |
 | 0 briefs during window | quiet news period or watchlist too small | spec §9 explicitly: re-run during an active window; do not pad with synthetic |
-| `error` state jobs | LLM crash, malformed event, timeout | inspect `queue_jobs.error` via `docker compose exec triage python -m cli.main forge orchestrator status`; the underlying `runs` rows have artifacts under `data/runs/<run_id>/` |
+| `error` state jobs | LLM crash, malformed event, timeout | inspect `queue_jobs.error` via `docker compose run --rm --entrypoint python triage -m cli.main forge orchestrator status`; the underlying `runs` rows have artifacts under `data/runs/<run_id>/` |
