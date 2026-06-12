@@ -113,11 +113,14 @@ With `fallback: none` (the compiled default), a dead probe refuses to start
 
 ## 3. Fallback flip (`fallback: none` → `fallback: api`)
 
-**Env-settable (wired in round A):** use `IIC_LLM_FALLBACK_MODE` for a
-global default across all roles, or the per-role variants
-`IIC_TRIAGE_LLM_FALLBACK_MODE` and `IIC_ALERT_GATE_LLM_FALLBACK_MODE`, and
-`IIC_LLM_FALLBACK_BUDGET` / per-role `IIC_TRIAGE_LLM_FALLBACK_BUDGET` /
-`IIC_ALERT_GATE_LLM_FALLBACK_BUDGET` for the daily call budget cap.
+**Env-settable:** use `IIC_LLM_FALLBACK_MODE` for a global default across
+both classification roles, or the per-role variants
+`IIC_TRIAGE_LLM_FALLBACK_MODE` and `IIC_ALERT_GATE_LLM_FALLBACK_MODE`.
+The daily call budget cap is `IIC_LLM_FALLBACK_DAILY_BUDGET` (global only —
+no per-role budget variant exists). Note: `ops/env.iic-forge.example`
+ships `IIC_LLM_FALLBACK_DAILY_BUDGET=0`, which overrides the compiled
+default of 500 — if you enable fallback, raise the budget too or zero
+fallback calls will be permitted.
 
 ```bash
 # In .env — flip triage and promoter to fallback=api:
@@ -138,7 +141,8 @@ Alternatively, to flip a role by editing the compiled default (a code change
 When `fallback: "api"` is active, a dead startup probe or a consecutive
 runtime failure run that reaches `fallback_threshold` (default: 3) causes
 the role to re-resolve to the global provider. The daily fallback budget
-(`fallback_daily_budget: 500` calls/UTC-day) caps the API spend. Budget
+caps the API spend (compiled default 500 calls/UTC-day; the env template
+ships `IIC_LLM_FALLBACK_DAILY_BUDGET=0`, which takes precedence). Budget
 consumption is persisted in `ops_counters` and survives restarts.
 
 The `fallback: "none"` default is the **recommended mode for production**:
