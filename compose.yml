@@ -8,6 +8,8 @@ x-app: &app
     - ops/env.iic-forge.example
   volumes:
     - iic_data:/data
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   restart: unless-stopped
 
 x-redis-dep: &redis_dep
