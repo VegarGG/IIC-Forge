@@ -468,6 +468,108 @@ def test_failed_total_matches_count(tmp_path):
 
 
 @pytest.mark.unit
+def test_count_api_classification_calls_counts_api_and_respects_window(tmp_path):
+    """count_api_classification_calls (from operations module):
+    - counts triage_salience rows with non-local provider
+    - excludes local-provider rows
+    - respects the window (excludes rows older than window_seconds)
+    """
+    from tradingagents.dashboard.panels.operations import count_api_classification_calls
+
+    conn = connect(str(tmp_path / "iic.db"))
+    now_ts = "2026-06-12T10:00:00+00:00"
+
+    # API-provider triage_salience call (should be counted)
+    store.insert_llm_call(
+        conn,
+        created_ts=now_ts,
+        role="triage_salience",
+        service_name="triage",
+        provider="openai",
+        model_id="gpt-4o",
+        base_url=None,
+        request_kind="structured",
+        linked_type="event",
+        linked_id="ev_api",
+        status="success",
+        latency_ms=200,
+        parse_ok=True,
+        fallback_mode="none",
+        fallback_used=False,
+        in_tokens=None,
+        out_tokens=None,
+        cache_hit_tokens=None,
+        cache_miss_tokens=None,
+        usd_estimate=None,
+        error_class=None,
+        error_message=None,
+    )
+    # Local-provider triage_salience call (should NOT be counted)
+    store.insert_llm_call(
+        conn,
+        created_ts=now_ts,
+        role="triage_salience",
+        service_name="triage",
+        provider="local",
+        model_id="qwen",
+        base_url="http://local",
+        request_kind="structured",
+        linked_type="event",
+        linked_id="ev_local",
+        status="success",
+        latency_ms=40,
+        parse_ok=True,
+        fallback_mode="none",
+        fallback_used=False,
+        in_tokens=None,
+        out_tokens=None,
+        cache_hit_tokens=None,
+        cache_miss_tokens=None,
+        usd_estimate=0.0,
+        error_class=None,
+        error_message=None,
+    )
+    # API-provider triage_salience call from 25h ago (outside 24h window)
+    old_ts = "2026-06-11T09:00:00+00:00"
+    store.insert_llm_call(
+        conn,
+        created_ts=old_ts,
+        role="triage_salience",
+        service_name="triage",
+        provider="deepseek",
+        model_id="deepseek-chat",
+        base_url=None,
+        request_kind="structured",
+        linked_type="event",
+        linked_id="ev_old",
+        status="success",
+        latency_ms=300,
+        parse_ok=True,
+        fallback_mode="none",
+        fallback_used=False,
+        in_tokens=None,
+        out_tokens=None,
+        cache_hit_tokens=None,
+        cache_miss_tokens=None,
+        usd_estimate=None,
+        error_class=None,
+        error_message=None,
+    )
+
+    # With 24h window: only the recent API call counts (local excluded, old excluded)
+    count = count_api_classification_calls(conn, now_ts=now_ts, window_seconds=86400)
+    assert count == 1, (
+        f"Expected 1 API classification call in window; got {count}"
+    )
+
+    # Without now_ts (all-time): both API calls count (local still excluded)
+    count_all = count_api_classification_calls(conn)
+    assert count_all == 2, (
+        f"Expected 2 API classification calls all-time (openai + deepseek); got {count_all}"
+    )
+
+
+@pytest.mark.unit
 def test_failed_groups_cap_limits_list_not_total(tmp_path):
     """When limit=1, the list is capped to 1 row but failed_total reflects the
     real count, and count_failed_delivery_groups is unbounded."""

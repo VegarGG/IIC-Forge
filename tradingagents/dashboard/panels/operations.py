@@ -21,6 +21,46 @@ def _dt(ts: str | None) -> datetime | None:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
+def count_api_classification_calls(
+    conn: sqlite3.Connection,
+    *,
+    now_ts: str | None = None,
+    window_seconds: int = 86400,
+) -> int:
+    """Count llm_calls rows where role is a classification role AND provider
+    is NOT local (i.e. an API-provider call that costs money).
+
+    Classification roles: triage_salience, alert_gate.
+    API providers: anything except 'local'.
+
+    When *now_ts* is provided, only rows within the most recent
+    *window_seconds* seconds are counted (same windowing convention as
+    fetch_llm_role_summary).  When omitted, counts all-time.
+    """
+    classification_roles = ("triage_salience", "alert_gate")
+    placeholders = ",".join("?" * len(classification_roles))
+
+    if now_ts is not None:
+        cutoff_dt = _dt(now_ts) - timedelta(seconds=window_seconds)
+        cutoff_iso = cutoff_dt.isoformat()
+        row = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM llm_calls "
+            f"WHERE role IN ({placeholders}) "
+            f"AND provider NOT IN ('local') "
+            f"AND datetime(created_ts) >= datetime(?)",
+            (*classification_roles, cutoff_iso),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM llm_calls "
+            f"WHERE role IN ({placeholders}) "
+            f"AND provider NOT IN ('local')",
+            classification_roles,
+        ).fetchone()
+
+    return int(row["cnt"]) if row else 0
+
+
 def _age_seconds(now_ts: str, ts: str | None) -> float | None:
     now = _dt(now_ts)
     other = _dt(ts)

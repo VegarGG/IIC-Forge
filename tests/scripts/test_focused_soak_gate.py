@@ -517,6 +517,88 @@ def test_redis_appendonly_not_yes_fails_check(tmp_path):
 # delivery_groups_bounded uses failed_total (unbounded count, not capped list)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Fix 1: legacy_unit_names() derives the list from ops/systemd/
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_legacy_unit_names_covers_sensing_units():
+    """legacy_unit_names() includes key legacy units and excludes the new
+    Compose supervisor."""
+    from scripts.focused_soak_gate import legacy_unit_names
+
+    names = legacy_unit_names()
+    assert "iic-sense-telegram.service" in names, (
+        "iic-sense-telegram.service must be in the legacy unit list"
+    )
+    assert "iic-telegram-bot.service" in names, (
+        "iic-telegram-bot.service must be in the legacy unit list"
+    )
+    assert "redis-server.service" in names, (
+        "redis-server.service is a legacy placeholder that must be checked"
+    )
+    assert "iic-forge-compose.service" not in names, (
+        "iic-forge-compose.service is the new supervisor — must NOT be checked"
+    )
+
+
+@pytest.mark.unit
+def test_default_old_service_checker_parses_systemctl(monkeypatch):
+    """default_old_service_checker reports only units that systemctl reports
+    as 'active'; units returning 'inactive' or raising are not reported."""
+    import subprocess as sp
+    from scripts.focused_soak_gate import default_old_service_checker, legacy_unit_names
+
+    units = legacy_unit_names()
+    # Pick the first unit to be 'active'; all others return 'inactive'
+    active_unit = units[0]
+
+    def fake_check_output(cmd, **kwargs):
+        unit_name = cmd[-1]  # systemctl is-active <unit>
+        if unit_name == active_unit:
+            return b"active\n"
+        return b"inactive\n"
+
+    monkeypatch.setattr(sp, "check_output", fake_check_output)
+    result = default_old_service_checker()
+    assert result == [active_unit], (
+        f"Only {active_unit!r} should be reported active; got {result}"
+    )
+
+
+@pytest.mark.unit
+def test_default_redis_checker_parses_replies(monkeypatch):
+    """default_redis_checker returns ok=True and appendonly='yes' when
+    redis-cli returns PONG and appendonly/yes; returns ok=False on exception."""
+    import subprocess as sp
+    from scripts.focused_soak_gate import default_redis_checker
+
+    calls = []
+
+    def fake_check_output(cmd, **kwargs):
+        calls.append(cmd)
+        if "ping" in cmd:
+            return b"PONG\n"
+        # CONFIG GET appendonly reply
+        return b"appendonly\nyes\n"
+
+    monkeypatch.setattr(sp, "check_output", fake_check_output)
+    result = default_redis_checker()
+    assert result == {"ok": True, "appendonly": "yes"}, (
+        f"Expected ok=True, appendonly='yes'; got {result}"
+    )
+    assert len(calls) == 2, "Expected two subprocess calls (ping + config)"
+
+    # Now test exception path
+    def fake_check_output_exc(cmd, **kwargs):
+        raise OSError("docker not found")
+
+    monkeypatch.setattr(sp, "check_output", fake_check_output_exc)
+    result_exc = default_redis_checker()
+    assert result_exc["ok"] is False
+    assert "error" in result_exc
+
+
 @pytest.mark.unit
 def test_delivery_groups_bounded_uses_failed_total(tmp_path):
     """Gate uses failed_total (unbounded) not len(failed_list[:50])."""

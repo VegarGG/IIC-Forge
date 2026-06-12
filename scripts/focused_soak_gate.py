@@ -7,8 +7,9 @@ runtime probes that require live subprocess interaction (old services stopped,
 Redis owned/configured).
 
 Amendment A: API classification spend is checked via llm_calls (not just the
-costs table).  A ``count_api_classification_calls`` helper is added to the
-operations panel module so this gate reads the shared evidence layer.
+costs table).  ``count_api_classification_calls`` lives in the operations panel
+module (tradingagents.dashboard.panels.operations) so this gate reads the
+shared evidence layer; it is imported from there.
 
 Amendment B: The deferred_retry_bounded check also fails when orphaned events
 are present; detail string includes orphaned count and oldest pending age.
@@ -29,63 +30,44 @@ import argparse
 import json
 import sqlite3
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
-from tradingagents.dashboard.panels.operations import fetch_operations_snapshot
+from tradingagents.dashboard.panels.operations import (
+    count_api_classification_calls,
+    fetch_operations_snapshot,
+)
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.persistence.db import connect
 
+# Repo root: two levels above this file (scripts/ → repo root)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 # ---------------------------------------------------------------------------
-# Shared evidence helper — lives here so the gate reads the shared layer
+# Legacy unit discovery (derives the list from ops/systemd/ at import time)
 # ---------------------------------------------------------------------------
 
-def count_api_classification_calls(
-    conn: sqlite3.Connection,
-    *,
-    now_ts: str | None = None,
-    window_seconds: int = 86400,
-) -> int:
-    """Count llm_calls rows where role is a classification role AND provider
-    is NOT local (i.e. an API-provider call that costs money).
+def legacy_unit_names() -> list[str]:
+    """Return sorted basenames of all legacy systemd units in ops/systemd/.
 
-    Classification roles: triage_salience, alert_gate.
-    API providers: anything except 'local'.
-
-    When *now_ts* is provided, only rows within the most recent
-    *window_seconds* seconds are counted (same windowing as
-    fetch_llm_role_summary).  When omitted, counts all-time.
+    Globs ``ops/systemd/*.service`` and ``ops/systemd/*.timer`` relative to
+    the repo root and returns the sorted basenames, EXCLUDING
+    ``iic-forge-compose.service`` (the new Compose supervisor — allowed to be
+    active).  ``redis-server.service`` is intentionally kept: it is a legacy
+    placeholder that must be disabled on the production host.
     """
-    classification_roles = ("triage_salience", "alert_gate")
-    placeholders = ",".join("?" * len(classification_roles))
-
-    if now_ts is not None:
-        # Compute cutoff the same way as fetch_llm_role_summary.
-        cutoff_dt = _dt(now_ts) - timedelta(seconds=window_seconds)
-        cutoff_iso = cutoff_dt.isoformat()
-        row = conn.execute(
-            f"SELECT COUNT(*) AS cnt FROM llm_calls "
-            f"WHERE role IN ({placeholders}) "
-            f"AND provider NOT IN ('local') "
-            f"AND datetime(created_ts) >= datetime(?)",
-            (*classification_roles, cutoff_iso),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            f"SELECT COUNT(*) AS cnt FROM llm_calls "
-            f"WHERE role IN ({placeholders}) "
-            f"AND provider NOT IN ('local')",
-            classification_roles,
-        ).fetchone()
-
-    return int(row["cnt"]) if row else 0
-
-
-def _dt(ts: str | None) -> datetime | None:
-    if not ts:
-        return None
-    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    systemd_dir = _REPO_ROOT / "ops" / "systemd"
+    units = sorted(
+        p.name
+        for p in systemd_dir.glob("*.service")
+        if p.name != "iic-forge-compose.service"
+    ) + sorted(
+        p.name
+        for p in systemd_dir.glob("*.timer")
+    )
+    return units
 
 
 # ---------------------------------------------------------------------------
@@ -93,18 +75,14 @@ def _dt(ts: str | None) -> datetime | None:
 # ---------------------------------------------------------------------------
 
 def default_old_service_checker() -> list[str]:
-    """Return names of old systemd services that are still active.
+    """Return names of old systemd units that are still active.
 
-    An empty list means all old services are confirmed stopped.
+    Derives the unit list from ``legacy_unit_names()`` (globbed from
+    ops/systemd/) so new legacy units are automatically included.
+    An empty list means all old units are confirmed stopped.
     """
-    names = [
-        "iic-triage.service",
-        "iic-promoter.service",
-        "iic-worker.service",
-        "redis-server.service",
-    ]
     active: list[str] = []
-    for name in names:
+    for name in legacy_unit_names():
         try:
             out = subprocess.check_output(
                 ["systemctl", "is-active", name],
@@ -121,17 +99,26 @@ def default_old_service_checker() -> list[str]:
 def default_redis_checker() -> dict[str, Any]:
     """Probe Compose-owned Redis: ping + appendonly config.
 
-    Returns a dict with at least ``ok`` (bool) and ``appendonly`` (str).
+    Uses ``--project-directory <repo_root>`` so the gate works when invoked
+    from any CWD.  Returns a dict with at least ``ok`` (bool) and
+    ``appendonly`` (str).
     """
+    project_dir = str(_REPO_ROOT)
     try:
         ping = subprocess.check_output(
-            ["docker", "compose", "exec", "-T", "redis", "redis-cli", "ping"],
+            [
+                "docker", "compose",
+                "--project-directory", project_dir,
+                "exec", "-T", "redis", "redis-cli", "ping",
+            ],
             stderr=subprocess.STDOUT,
             timeout=10,
         ).decode()
         appendonly = subprocess.check_output(
             [
-                "docker", "compose", "exec", "-T", "redis",
+                "docker", "compose",
+                "--project-directory", project_dir,
+                "exec", "-T", "redis",
                 "redis-cli", "CONFIG", "GET", "appendonly",
             ],
             stderr=subprocess.STDOUT,
@@ -381,6 +368,8 @@ def main() -> int:
     )
 
     if args.json:
+        # JSON embeds the full snapshot; failed-groups list is capped at 50 by
+        # the shared layer; output size scales with failure count.
         print(json.dumps(report, indent=2, default=str))
     else:
         mark = "PASS" if report["pass"] else "FAIL"
