@@ -85,6 +85,20 @@ def _apply_nested_env_overrides(config: dict) -> dict:
     if policy:
         config["delivery_policy"] = policy
 
+    # Worker lane + concurrency + timeout overrides (Task 9).
+    # IIC_WORKER_LANE: which queue lane this worker claims (e.g. "action", "deep").
+    # IIC_WORKER_CONCURRENCY: max concurrent jobs (int).
+    # IIC_WORKER_JOB_TIMEOUT_MIN: per-job wall-clock cap in minutes (int).
+    worker_lane = os.environ.get("IIC_WORKER_LANE")
+    if worker_lane:
+        config["worker_lane"] = worker_lane
+    worker_concurrency = os.environ.get("IIC_WORKER_CONCURRENCY")
+    if worker_concurrency:
+        config["max_concurrent_jobs"] = int(worker_concurrency)
+    worker_timeout = os.environ.get("IIC_WORKER_JOB_TIMEOUT_MIN")
+    if worker_timeout:
+        config["worker_job_timeout_min"] = int(worker_timeout)
+
     # Per-role LLM routing overrides (IIC-FORGE-05 Task 4).
     # These map into the nested llm_roles dict; the flat _ENV_OVERRIDES table
     # cannot reach nested keys, so the merge is done here.
@@ -154,6 +168,8 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     "worker_poll_interval_s": 2,
     "worker_job_timeout_min": 20,
     "max_concurrent_jobs": 1,
+    "worker_lane": "deep",
+    "worker_lane_timeouts": {"action": 300, "deep": 1200},
     # Cost guards (program-spec Appendix A: enabled=False during F0–F5)
     "trigger_backpressure_enabled": False,
     "trigger_backpressure_max_pending": 20,

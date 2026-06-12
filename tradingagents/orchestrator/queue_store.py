@@ -23,40 +23,66 @@ def insert_queue_job(
     job_type: str,
     payload: str,                      # already-serialized JSON string
     trigger_event_id: Optional[str],
+    lane: str = "deep",
+    timeout_seconds: Optional[int] = None,
 ) -> int:
     cur = conn.execute(
         "INSERT INTO queue_jobs (job_type, payload, state, enqueued_ts, "
-        "trigger_event_id) VALUES (?, ?, 'queued', ?, ?)",
-        (job_type, payload, _now_iso(), trigger_event_id),
+        "trigger_event_id, lane, timeout_seconds) VALUES (?, ?, 'queued', ?, ?, ?, ?)",
+        (job_type, payload, _now_iso(), trigger_event_id, lane, timeout_seconds),
     )
     conn.commit()
     return cur.lastrowid
 
 
-def lease_one(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
+def lease_one(conn: sqlite3.Connection, *, lane: Optional[str] = None) -> Optional[sqlite3.Row]:
     """Atomically claim the oldest queued job. Returns the updated row or None.
 
     Uses ``UPDATE … RETURNING`` (sqlite >= 3.35). The implicit BEGIN IMMEDIATE
     from ``with conn:`` ensures two concurrent leasers cannot both win the
     same job — the second sees the row already updated and returns nothing.
+
+    When ``lane`` is given, only jobs on that lane are claimed; when None,
+    any lane is eligible (preserves pre-lane behavior for existing callers).
+    heartbeat_ts is set to the same timestamp as started_ts on claim.
     """
+    lane_filter = "AND lane = ?" if lane is not None else ""
+    params = [_now_iso()]
+    if lane is not None:
+        params.append(lane)
     with conn:
         row = conn.execute(
-            """
+            f"""
             UPDATE queue_jobs
                SET state = 'running',
-                   started_ts = ?
+                   started_ts = ?,
+                   heartbeat_ts = ?
              WHERE job_id = (
                  SELECT job_id FROM queue_jobs
                   WHERE state = 'queued'
+                  {lane_filter}
                   ORDER BY job_id
                   LIMIT 1
              )
-         RETURNING job_id, job_type, payload, trigger_event_id, state, started_ts
+         RETURNING job_id, job_type, payload, trigger_event_id, state, started_ts, lane, timeout_seconds
             """,
-            (_now_iso(),),
+            (params[0], *params),
         ).fetchone()
     return row
+
+
+def lane_depth(conn: sqlite3.Connection) -> dict:
+    """Return per-lane, per-state job counts for all non-empty combinations.
+
+    Example: {"action": {"queued": 2, "running": 1}, "deep": {"queued": 1}}
+    """
+    rows = conn.execute(
+        "SELECT lane, state, COUNT(*) AS n FROM queue_jobs GROUP BY lane, state"
+    ).fetchall()
+    out: dict = {}
+    for row in rows:
+        out.setdefault(row["lane"], {})[row["state"]] = int(row["n"])
+    return out
 
 
 def mark_done(

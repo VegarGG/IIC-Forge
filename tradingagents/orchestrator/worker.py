@@ -48,17 +48,21 @@ def drain_one(
     *,
     secretary,
     budget_guard: Optional[DailyBudgetGuard] = None,
+    lane: Optional[str] = None,
 ) -> bool:
     """Lease + dispatch + mark exactly one job. Returns True if a job ran.
 
     Per-job wall-clock cap is enforced in ``main()`` (using a ThreadPoolExecutor
     + future.result(timeout)); ``drain_one`` is the synchronous core so unit
     tests can exercise it without process-level timeout machinery.
+
+    ``lane`` restricts which queue lane is claimed; None claims any lane
+    (backward-compatible default).
     """
     if budget_guard is not None and not budget_guard.gate(conn):
         return False
 
-    job = queue_store.lease_one(conn)
+    job = queue_store.lease_one(conn, lane=lane)
     if job is None:
         return False
 
@@ -182,6 +186,7 @@ def main(config: Optional[dict] = None) -> None:
             tls.secretary = _build_secretary(cfg, tls.conn)
         return drain_one(
             tls.conn, secretary=tls.secretary, budget_guard=budget,
+            lane=cfg.get("worker_lane"),
         )
 
     # Single-slot executor (max_concurrent_jobs is 1). On a per-job timeout we
@@ -193,10 +198,11 @@ def main(config: Optional[dict] = None) -> None:
     ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drain")
 
     _install_signal_handlers()
-    log.info("worker started: poll=%ss timeout=%dm budget_enabled=%s "
+    log.info("worker started: lane=%s poll=%ss timeout=%dm budget_enabled=%s "
              "sweep_max_age=%ds sweep_interval=%ds",
-             cfg["worker_poll_interval_s"], cfg["worker_job_timeout_min"],
-             budget.enabled, sweep_max_age, sweep_interval)
+             cfg.get("worker_lane"), cfg["worker_poll_interval_s"],
+             cfg["worker_job_timeout_min"], budget.enabled,
+             sweep_max_age, sweep_interval)
 
     try:
         while not _shutdown:
