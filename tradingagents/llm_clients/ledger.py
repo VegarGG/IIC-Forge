@@ -14,6 +14,10 @@ def _now_iso() -> str:
 
 
 def _tokens(token_usage: Optional[dict[str, Any]]) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+    # Accepts either langchain `llm_output["token_usage"]` (prompt_tokens/
+    # completion_tokens, DeepSeek prompt_cache_{hit,miss}_tokens) or AIMessage
+    # `usage_metadata` (input_tokens/output_tokens). Pass one dict whole;
+    # Anthropic nested cache fields must be pre-normalized by the caller.
     if not token_usage:
         return None, None, None, None
     in_tokens = token_usage.get("prompt_tokens") or token_usage.get("input_tokens")
