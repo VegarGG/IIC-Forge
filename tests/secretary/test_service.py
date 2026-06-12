@@ -97,8 +97,11 @@ def test_compose_deep_dive_delivers_when_enabled(db_and_dirs, monkeypatch):
     class FakeChannel:
         def __init__(self, name):
             self.name = name
+            self.channel_name = name
 
-        def send(self, *, brief, mode, body):
+        def send(self, *, brief, mode, body,
+                 delivery_group_id=None, attempt_rank=None,
+                 fallback_of=None, is_fallback=False):
             sent.append({"brief": brief, "mode": mode, "body": body})
             return store.insert_delivery(
                 conn,
@@ -108,6 +111,10 @@ def test_compose_deep_dive_delivers_when_enabled(db_and_dirs, monkeypatch):
                 sent_ts=datetime.now(timezone.utc).isoformat(),
                 channel_ref=self.name,
                 skip_reason=None,
+                delivery_group_id=delivery_group_id,
+                attempt_rank=attempt_rank,
+                fallback_of=fallback_of,
+                is_fallback=is_fallback,
             )
 
     monkeypatch.setattr(
@@ -123,6 +130,8 @@ def test_compose_deep_dive_delivers_when_enabled(db_and_dirs, monkeypatch):
         deliver=True,
     )
 
+    # Under ordered policy, telegram is attempted first; on success email is
+    # suppressed, so exactly one delivery is sent (the telegram attempt).
     assert sent
     assert {call["mode"] for call in sent} == {"deep_dive"}
     assert all(call["brief"]["brief_id"] == brief_id for call in sent)

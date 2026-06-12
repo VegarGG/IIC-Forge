@@ -71,15 +71,36 @@ def _make_light_alert_keyboard(brief_id: str, tickers: list[str]):
 class TelegramOutbound(DeliveryChannel):
     channel_name = "telegram"
 
-    def send(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
+    def send(
+        self,
+        *,
+        brief: Dict[str, Any],
+        mode: str,
+        body: str,
+        delivery_group_id=None,
+        attempt_rank=None,
+        fallback_of=None,
+        is_fallback: bool = False,
+    ) -> int:
         cfg = self._config["telegram_bot"]
         if not cfg.get("enabled", False) or not cfg.get("allowed_chat_ids"):
             return store.insert_delivery(
                 self._conn, brief_id=brief["brief_id"], channel=self.channel_name,
                 status="skipped", sent_ts=None, channel_ref=None,
                 skip_reason="telegram_disabled",
+                delivery_group_id=delivery_group_id,
+                attempt_rank=attempt_rank,
+                fallback_of=fallback_of,
+                is_fallback=is_fallback,
+                failure_reason=None,
             )
-        return super().send(brief=brief, mode=mode, body=body)
+        return super().send(
+            brief=brief, mode=mode, body=body,
+            delivery_group_id=delivery_group_id,
+            attempt_rank=attempt_rank,
+            fallback_of=fallback_of,
+            is_fallback=is_fallback,
+        )
 
     def _send_impl(self, brief: Dict[str, Any], mode: str, body: str) -> tuple:
         token = os.environ.get("IIC_TELEGRAM_BOT_TOKEN", "")

@@ -78,6 +78,13 @@ def _apply_nested_env_overrides(config: dict) -> dict:
             tok.strip().lstrip("@") for tok in chans.split(",") if tok.strip()
         ]
 
+    # Delivery policy override (Task 8). Flat _ENV_OVERRIDES cannot reach
+    # nested keys, but delivery_policy is top-level so we handle it here
+    # alongside other non-table overrides for consistent IIC_ prefix convention.
+    policy = os.environ.get("IIC_DELIVERY_POLICY")
+    if policy:
+        config["delivery_policy"] = policy
+
     # Per-role LLM routing overrides (IIC-FORGE-05 Task 4).
     # These map into the nested llm_roles dict; the flat _ENV_OVERRIDES table
     # cannot reach nested keys, so the merge is done here.
@@ -267,6 +274,7 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
             "cli": "full",
         },
     },
+    "delivery_policy": "ordered_telegram_email",
     "telegram_bot": {
         "enabled": True,
         # Committed default is empty = deny-all (restricted). Populate at

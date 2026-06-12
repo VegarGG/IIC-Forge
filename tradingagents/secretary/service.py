@@ -108,6 +108,36 @@ def _build_channel(name, conn, config):
     return None
 
 
+def _deliver_with_policy(conn, config, *, brief, mode, urgent=False) -> None:
+    """Ordered Telegram-primary/email-fallback delivery helper.
+
+    Builds only telegram and email channels (policy channels); renders bodies
+    per channel; calls deliver_ordered. The cli channel is excluded from the
+    policy since it is not part of the Telegram/email ordered chain.
+    Never raises — delivery failures are recorded as deliveries rows.
+    """
+    from tradingagents.delivery.policy import deliver_ordered
+    from tradingagents.delivery.render import render_for_channel
+
+    channels = {}
+    for name in ("telegram", "email"):
+        ch = _build_channel(name, conn, config)
+        if ch is not None:
+            channels[name] = ch
+    bodies = {
+        name: render_for_channel(channel=name, mode=mode, brief=brief)
+        for name in channels
+    }
+    deliver_ordered(
+        conn=conn,
+        brief=brief,
+        mode=mode,
+        bodies=bodies,
+        channels=channels,
+        urgent=urgent,
+    )
+
+
 class RefinementDepthExceeded(Exception):
     """Raised when refinement chain would exceed configured max_depth."""
 
@@ -456,37 +486,15 @@ class Secretary:
         return brief_id
 
     def _deliver_light_alert(self, brief_id, tickers, summary, ev) -> None:
-        """Best-effort fan-out to enabled channels. Delivery failures are
-        recorded as deliveries rows by each channel; never raise here."""
+        """Ordered Telegram-primary/email-fallback delivery for light alerts."""
         from tradingagents.default_config import DEFAULT_CONFIG
-        from tradingagents.delivery.render import render_for_channel
         config = dict(DEFAULT_CONFIG)
         brief = {
             "brief_id": brief_id, "mode": "event_alert_light",
             "summary": summary, "tickers": list(tickers),
             "event_headline": (ev["source"] or "event"),
         }
-        names = list(config["delivery"]["enabled_channels"])
-        if config["telegram_bot"]["enabled"] and "telegram" not in names:
-            names.append("telegram")
-        for name in names:
-            try:
-                ch = _build_channel(name, self._conn, config)
-                if ch is None:
-                    continue
-                body = render_for_channel(
-                    channel=name, mode="event_alert_light", brief=brief)
-                ch.send(brief=brief, mode="event_alert_light", body=body)
-            except Exception as exc:  # noqa: BLE001
-                store.insert_delivery(
-                    self._conn,
-                    brief_id=brief_id,
-                    channel=name,
-                    status="failed",
-                    sent_ts=None,
-                    channel_ref=str(exc)[:500],
-                    skip_reason=None,
-                )
+        _deliver_with_policy(self._conn, config, brief=brief, mode="event_alert_light")
 
     def _deliver_deep_dive(
         self,
@@ -496,9 +504,8 @@ class Secretary:
         generated_ts: str,
         synthesis: Dict[str, str],
     ) -> None:
-        """Best-effort fan-out for manually requested deep-dive briefs."""
+        """Ordered Telegram-primary/email-fallback delivery for deep-dive briefs."""
         from tradingagents.default_config import DEFAULT_CONFIG
-        from tradingagents.delivery.render import render_for_channel
         config = dict(DEFAULT_CONFIG)
         brief = {
             "brief_id": brief_id,
@@ -514,27 +521,7 @@ class Secretary:
                 }
             ],
         }
-        names = list(config["delivery"]["enabled_channels"])
-        if config["telegram_bot"]["enabled"] and "telegram" not in names:
-            names.append("telegram")
-        for name in names:
-            try:
-                ch = _build_channel(name, self._conn, config)
-                if ch is None:
-                    continue
-                body = render_for_channel(
-                    channel=name, mode="deep_dive", brief=brief)
-                ch.send(brief=brief, mode="deep_dive", body=body)
-            except Exception as exc:  # noqa: BLE001
-                store.insert_delivery(
-                    self._conn,
-                    brief_id=brief_id,
-                    channel=name,
-                    status="failed",
-                    sent_ts=None,
-                    channel_ref=str(exc)[:500],
-                    skip_reason=None,
-                )
+        _deliver_with_policy(self._conn, config, brief=brief, mode="deep_dive")
 
     def _deliver_event_alert(
         self,
@@ -545,9 +532,8 @@ class Secretary:
         raw_text: str,
         synthesis: Dict[str, str],
     ) -> None:
-        """Best-effort fan-out for approved full event-alert briefs."""
+        """Ordered Telegram-primary/email-fallback delivery for event-alert briefs."""
         from tradingagents.default_config import DEFAULT_CONFIG
-        from tradingagents.delivery.render import render_for_channel
         config = dict(DEFAULT_CONFIG)
         brief = {
             "brief_id": brief_id,
@@ -564,27 +550,7 @@ class Secretary:
                 }
             ],
         }
-        names = list(config["delivery"]["enabled_channels"])
-        if config["telegram_bot"]["enabled"] and "telegram" not in names:
-            names.append("telegram")
-        for name in names:
-            try:
-                ch = _build_channel(name, self._conn, config)
-                if ch is None:
-                    continue
-                body = render_for_channel(
-                    channel=name, mode="event_alert", brief=brief)
-                ch.send(brief=brief, mode="event_alert", body=body)
-            except Exception as exc:  # noqa: BLE001
-                store.insert_delivery(
-                    self._conn,
-                    brief_id=brief_id,
-                    channel=name,
-                    status="failed",
-                    sent_ts=None,
-                    channel_ref=str(exc)[:500],
-                    skip_reason=None,
-                )
+        _deliver_with_policy(self._conn, config, brief=brief, mode="event_alert")
 
     # ----- F5: morning digest -----
     def compose_morning_digest(

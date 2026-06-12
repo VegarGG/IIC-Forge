@@ -19,14 +19,35 @@ from tradingagents.persistence import store
 class EmailOutbound(DeliveryChannel):
     channel_name = "email"
 
-    def send(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
+    def send(
+        self,
+        *,
+        brief: Dict[str, Any],
+        mode: str,
+        body: str,
+        delivery_group_id=None,
+        attempt_rank=None,
+        fallback_of=None,
+        is_fallback: bool = False,
+    ) -> int:
         if not self._config["smtp"].get("enabled", False):
             return store.insert_delivery(
                 self._conn, brief_id=brief["brief_id"], channel=self.channel_name,
                 status="skipped", sent_ts=None, channel_ref=None,
                 skip_reason="smtp_disabled",
+                delivery_group_id=delivery_group_id,
+                attempt_rank=attempt_rank,
+                fallback_of=fallback_of,
+                is_fallback=is_fallback,
+                failure_reason=None,
             )
-        return super().send(brief=brief, mode=mode, body=body)
+        return super().send(
+            brief=brief, mode=mode, body=body,
+            delivery_group_id=delivery_group_id,
+            attempt_rank=attempt_rank,
+            fallback_of=fallback_of,
+            is_fallback=is_fallback,
+        )
 
     def _send_impl(self, brief: Dict[str, Any], mode: str, body: str) -> tuple:
         smtp_cfg = self._config["smtp"]
