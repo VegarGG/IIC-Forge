@@ -44,7 +44,7 @@ with tab_ops:
     c1.metric("Deferred pending", snap["deferred_salience"].get("pending", 0))
     c2.metric("Deferred dead", snap["deferred_salience"].get("dead", 0))
     c3.metric("Deferred orphaned", snap["deferred_salience"].get("orphaned_events", 0))
-    c4.metric("Failed delivery groups", len(snap["delivery_groups"]["failed"]))
+    c4.metric("Failed delivery groups", snap["delivery_groups"]["failed_total"])
     c5.metric("Skipped-only groups", snap["delivery_groups"]["skipped_only"])
     st.subheader("Queue lanes")
     lane_rows = [

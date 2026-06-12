@@ -486,3 +486,14 @@ ALTER TABLE queue_jobs ADD COLUMN heartbeat_ts TEXT;
 ALTER TABLE queue_jobs ADD COLUMN timeout_seconds INTEGER;
 CREATE INDEX IF NOT EXISTS idx_queue_jobs_lane_state
     ON queue_jobs(lane, state, enqueued_ts);
+
+-- ============================================================
+-- Task 10 follow-ups: operations query layer hardening
+-- ============================================================
+-- Partial index to speed the orphan-scan query in fetch_deferred_summary:
+-- focuses only on the 'deferred' rows with salience IS NULL (the exact
+-- predicate in the WHERE clause), turning a full SCAN into an index SEARCH.
+-- EXPLAIN QUERY PLAN before: "SCAN e"; after: "SEARCH e USING INDEX
+-- idx_events_salience_source (salience_source=?)".
+CREATE INDEX IF NOT EXISTS idx_events_salience_source
+    ON events(salience_source) WHERE salience IS NULL;

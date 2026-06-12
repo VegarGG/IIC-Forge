@@ -31,6 +31,33 @@ def _insert_event(conn, event_id, *, salience=None, salience_source=None):
     conn.commit()
 
 
+def _insert_llm_call(conn, created_ts, *, role="triage_salience", status="success"):
+    store.insert_llm_call(
+        conn,
+        created_ts=created_ts,
+        role=role,
+        service_name="triage",
+        provider="local",
+        model_id="qwen",
+        base_url="http://local",
+        request_kind="structured",
+        linked_type="event",
+        linked_id="ev1",
+        status=status,
+        latency_ms=50,
+        parse_ok=True,
+        fallback_mode="none",
+        fallback_used=False,
+        in_tokens=None,
+        out_tokens=None,
+        cache_hit_tokens=None,
+        cache_miss_tokens=None,
+        usd_estimate=0.0,
+        error_class=None,
+        error_message=None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Plan baseline test (per Task 10 plan)
 # ---------------------------------------------------------------------------
@@ -52,30 +79,7 @@ def test_operations_snapshot_reads_shared_evidence(tmp_path):
         events_emitted_last_poll=1,
         diagnostics={},
     )
-    store.insert_llm_call(
-        conn,
-        created_ts="2026-06-12T10:00:00+00:00",
-        role="triage_salience",
-        service_name="triage",
-        provider="local",
-        model_id="qwen",
-        base_url="http://local",
-        request_kind="structured",
-        linked_type="event",
-        linked_id="ev1",
-        status="success",
-        latency_ms=50,
-        parse_ok=True,
-        fallback_mode="none",
-        fallback_used=False,
-        in_tokens=None,
-        out_tokens=None,
-        cache_hit_tokens=None,
-        cache_miss_tokens=None,
-        usd_estimate=0.0,
-        error_class=None,
-        error_message=None,
-    )
+    _insert_llm_call(conn, "2026-06-12T10:00:00+00:00")
     snap = fetch_operations_snapshot(conn, now_ts="2026-06-12T10:05:00+00:00")
     assert snap["sources"]["gdelt"]["consecutive_failures"] == 0
     assert snap["llm_calls"]["triage_salience"]["total"] == 1
@@ -209,8 +213,8 @@ def test_sent_group_not_in_failed_or_skipped(tmp_path):
 
 @pytest.mark.unit
 def test_delivery_groups_key_shape_in_snapshot(tmp_path):
-    """fetch_operations_snapshot returns delivery_groups with both 'failed' list
-    and 'skipped_only' int keys."""
+    """fetch_operations_snapshot returns delivery_groups with 'failed' list,
+    'failed_total' int, and 'skipped_only' int keys."""
     from tradingagents.dashboard.panels.operations import fetch_operations_snapshot
 
     conn = connect(str(tmp_path / "iic.db"))
@@ -220,6 +224,8 @@ def test_delivery_groups_key_shape_in_snapshot(tmp_path):
     dg = snap["delivery_groups"]
     assert "failed" in dg
     assert isinstance(dg["failed"], list)
+    assert "failed_total" in dg
+    assert isinstance(dg["failed_total"], int)
     assert "skipped_only" in dg
     assert isinstance(dg["skipped_only"], int)
 
@@ -307,3 +313,186 @@ def test_deferred_summary_in_snapshot(tmp_path):
     assert "deferred_salience" in snap
     assert "orphaned_events" in snap["deferred_salience"]
     assert snap["deferred_salience"]["orphaned_events"] == 1
+
+
+# ---------------------------------------------------------------------------
+# New tests: LLM call windowing
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_llm_summary_window_excludes_old_calls(tmp_path):
+    """An llm_call older than the window is excluded when now_ts is given."""
+    from tradingagents.dashboard.panels.operations import fetch_llm_role_summary
+
+    conn = connect(str(tmp_path / "iic.db"))
+    # Old call: 25 hours before now_ts
+    _insert_llm_call(conn, "2026-06-11T09:00:00+00:00", role="triage_salience")
+    # Recent call: 1 hour before now_ts
+    _insert_llm_call(conn, "2026-06-12T09:00:00+00:00", role="triage_salience")
+
+    now_ts = "2026-06-12T10:00:00+00:00"
+    # With window (24h): only recent call should appear
+    summary = fetch_llm_role_summary(conn, now_ts=now_ts, window_seconds=86400)
+    assert "triage_salience" in summary
+    assert summary["triage_salience"]["total"] == 1, (
+        "only the recent call (within 24h window) should be counted"
+    )
+
+
+@pytest.mark.unit
+def test_llm_summary_no_now_ts_includes_all_calls(tmp_path):
+    """Without now_ts, all calls are included (all-time, backward-compatible)."""
+    from tradingagents.dashboard.panels.operations import fetch_llm_role_summary
+
+    conn = connect(str(tmp_path / "iic.db"))
+    # Old call: 25 hours before a hypothetical now
+    _insert_llm_call(conn, "2026-06-11T09:00:00+00:00", role="triage_salience")
+    # Recent call
+    _insert_llm_call(conn, "2026-06-12T09:00:00+00:00", role="triage_salience")
+
+    # No now_ts → all-time
+    summary = fetch_llm_role_summary(conn)
+    assert "triage_salience" in summary
+    assert summary["triage_salience"]["total"] == 2, (
+        "all-time query must include both calls"
+    )
+
+
+# ---------------------------------------------------------------------------
+# New tests: oldest_pending_age_seconds
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_oldest_pending_age_seconds_with_pending_row(tmp_path):
+    """When a pending retry row exists and now_ts is given, oldest_pending_age_seconds
+    should be a positive float."""
+    from tradingagents.dashboard.panels.operations import fetch_deferred_summary
+
+    conn = connect(str(tmp_path / "iic.db"))
+    _insert_event(conn, "ev-age-test", salience=None, salience_source="deferred")
+
+    # Insert directly so we can control created_ts (store function always uses _now_iso)
+    conn.execute(
+        "INSERT INTO deferred_salience_retry "
+        "(event_id, source, raw_path, payload_hash, payload_json, reason, "
+        "next_attempt_ts, state, last_error, created_ts, updated_ts) "
+        "VALUES (?, 'gdelt', NULL, 'agehash1', '{\"text\":\"age test\"}', "
+        "'local_unavailable', '2026-06-12T11:00:00+00:00', 'pending', "
+        "'local_unavailable', '2026-06-12T08:00:00+00:00', '2026-06-12T08:00:00+00:00')",
+        ("ev-age-test",),
+    )
+    conn.commit()
+
+    now_ts = "2026-06-12T10:00:00+00:00"
+    summary = fetch_deferred_summary(conn, now_ts=now_ts)
+    age = summary["oldest_pending_age_seconds"]
+    assert age is not None
+    assert age > 0, "pending row created 2h ago should have positive age"
+
+
+@pytest.mark.unit
+def test_oldest_pending_age_seconds_no_pending(tmp_path):
+    """When no pending rows exist, oldest_pending_age_seconds is None."""
+    from tradingagents.dashboard.panels.operations import fetch_deferred_summary
+
+    conn = connect(str(tmp_path / "iic.db"))
+    # No deferred retry rows at all
+    now_ts = "2026-06-12T10:00:00+00:00"
+    summary = fetch_deferred_summary(conn, now_ts=now_ts)
+    assert summary["oldest_pending_age_seconds"] is None
+
+
+@pytest.mark.unit
+def test_oldest_pending_age_seconds_no_now_ts(tmp_path):
+    """Without now_ts, oldest_pending_age_seconds is None even if pending rows exist."""
+    from tradingagents.dashboard.panels.operations import fetch_deferred_summary
+
+    conn = connect(str(tmp_path / "iic.db"))
+    _insert_event(conn, "ev-age-no-ts", salience=None, salience_source="deferred")
+
+    # Insert directly so we can control created_ts (store function always uses _now_iso)
+    conn.execute(
+        "INSERT INTO deferred_salience_retry "
+        "(event_id, source, raw_path, payload_hash, payload_json, reason, "
+        "next_attempt_ts, state, last_error, created_ts, updated_ts) "
+        "VALUES (?, 'gdelt', NULL, 'agehash2', '{\"text\":\"no ts test\"}', "
+        "'local_unavailable', '2026-06-12T11:00:00+00:00', 'pending', "
+        "'local_unavailable', '2026-06-12T08:00:00+00:00', '2026-06-12T08:00:00+00:00')",
+        ("ev-age-no-ts",),
+    )
+    conn.commit()
+
+    summary = fetch_deferred_summary(conn)
+    assert summary["oldest_pending_age_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# New tests: failed_total / capped list shape
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_failed_total_matches_count(tmp_path):
+    """count_failed_delivery_groups returns the same total as len(fetch_failed_delivery_groups
+    with a large limit), and failed_total in the snapshot matches."""
+    from tradingagents.dashboard.panels.operations import (
+        count_failed_delivery_groups,
+        fetch_failed_delivery_groups,
+        fetch_operations_snapshot,
+    )
+
+    conn = connect(str(tmp_path / "iic.db"))
+    # Insert 3 separate failed groups
+    for i in range(1, 4):
+        _insert_brief(conn, f"b{i}")
+        store.insert_delivery(
+            conn,
+            brief_id=f"b{i}",
+            channel="telegram",
+            status="failed",
+            sent_ts=None,
+            channel_ref=None,
+            skip_reason=None,
+            delivery_group_id=f"gfail{i}",
+            attempt_rank=1,
+            failure_reason="connection_refused",
+        )
+
+    total = count_failed_delivery_groups(conn)
+    capped = fetch_failed_delivery_groups(conn, limit=50)
+    assert total == 3
+    assert len(capped) == 3
+
+    snap = fetch_operations_snapshot(conn, now_ts="2026-06-12T10:00:00+00:00")
+    assert snap["delivery_groups"]["failed_total"] == 3
+    assert len(snap["delivery_groups"]["failed"]) == 3
+
+
+@pytest.mark.unit
+def test_failed_groups_cap_limits_list_not_total(tmp_path):
+    """When limit=1, the list is capped to 1 row but failed_total reflects the
+    real count, and count_failed_delivery_groups is unbounded."""
+    from tradingagents.dashboard.panels.operations import (
+        count_failed_delivery_groups,
+        fetch_failed_delivery_groups,
+    )
+
+    conn = connect(str(tmp_path / "iic.db"))
+    for i in range(1, 4):
+        _insert_brief(conn, f"bcap{i}")
+        store.insert_delivery(
+            conn,
+            brief_id=f"bcap{i}",
+            channel="telegram",
+            status="failed",
+            sent_ts=None,
+            channel_ref=None,
+            skip_reason=None,
+            delivery_group_id=f"gcap{i}",
+            attempt_rank=1,
+            failure_reason="timeout",
+        )
+
+    capped = fetch_failed_delivery_groups(conn, limit=1)
+    total = count_failed_delivery_groups(conn)
+    assert len(capped) == 1
+    assert total == 3
