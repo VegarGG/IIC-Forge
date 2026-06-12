@@ -92,5 +92,9 @@ def test_ensure_repo_root_on_path_is_idempotent():
 
     root = ensure_repo_root_on_path()
     assert root == ROOT
+    # pytest may have put the root on sys.path already; the helper owns only
+    # the delta — repeated calls must not add entries.
+    before = sys.path.count(str(root))
+    assert before >= 1
     ensure_repo_root_on_path()
-    assert sys.path.count(str(root)) == 1
+    assert sys.path.count(str(root)) == before

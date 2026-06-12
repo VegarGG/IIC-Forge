@@ -406,11 +406,16 @@ async def test_retry_that_defers_again_does_not_duplicate_rows(tmp_path):
     original_retry_id = all_retries[0]["retry_id"]
 
     # Step 2a: run_due_retries_once — scorer still defers; attempt_count becomes 1.
-    # Advance now_ts well past the initial backoff (60 s).
+    # process_one schedules against the real wall clock, so the claim timestamp
+    # must be derived from the row's actual next_attempt_ts (a fixed literal
+    # here made the test time-of-day dependent).
+    from datetime import timedelta
+
+    first_due = datetime.fromisoformat(all_retries[0]["next_attempt_ts"]) + timedelta(seconds=1)
     count = await run_due_retries_once(
         conn,
         triage=t,
-        now_ts="2026-06-12T10:02:00+00:00",
+        now_ts=first_due.isoformat(),
         limit=10,
         max_attempts=5,
     )
@@ -433,7 +438,6 @@ async def test_retry_that_defers_again_does_not_duplicate_rows(tmp_path):
     pending = store.fetch_deferred_salience_retries(conn, state="pending")
     assert pending, "Row should be rescheduled (pending) before second retry run"
     next_due = pending[0]["next_attempt_ts"]
-    from datetime import timedelta
     next_due_dt = datetime.fromisoformat(next_due) + timedelta(seconds=1)
 
     count = await run_due_retries_once(
