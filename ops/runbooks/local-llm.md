@@ -66,9 +66,10 @@ The IIC startup probe mirrors these two checks exactly: see
 
 The cutover is a pure env change — no code changes, no service file edits.
 Add the following vars to the `.env` file consumed by both units
-(`/home/ziwei-huang/TradingAgents/TradingAgents/.env`) or inject them as
-`Environment=` lines in the service files (see the commented blocks in
-`ops/systemd/iic-triage.service` and `ops/systemd/iic-promoter.service`).
+(`/opt/iic-forge/.env`, or `ops/env.iic-forge.example` as the template) or
+inject them as `Environment=` lines in the service files (see the commented
+blocks in `ops/systemd/iic-triage.service` and
+`ops/systemd/iic-promoter.service`).
 
 ### Vars to set
 
@@ -220,8 +221,8 @@ sudo systemctl start iic-triage iic-promoter
 new model. Check them during and after the monitoring window:
 
 ```bash
-cd /home/ziwei-huang/IIC-Forge/IIC-Forge && \
-PYTHONPATH=. /home/ziwei-huang/miniconda3/bin/python scripts/f4_f5_exit_gate.py \
+cd /opt/iic-forge && \
+python scripts/f4_f5_exit_gate.py \
     --soak-report --local-model-id <new-model-id>
 # Add --json for machine-readable output
 ```
@@ -275,8 +276,8 @@ journalctl -u iic-promoter -n 10 --no-pager | grep 'resolved:'
 ### Soak report
 
 ```bash
-cd /home/ziwei-huang/IIC-Forge/IIC-Forge && \
-PYTHONPATH=. /home/ziwei-huang/miniconda3/bin/python scripts/f4_f5_exit_gate.py \
+cd /opt/iic-forge && \
+python scripts/f4_f5_exit_gate.py \
     --soak-report [--local-model-id <id>] [--json]
 ```
 

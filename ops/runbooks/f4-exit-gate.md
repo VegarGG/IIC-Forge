@@ -22,9 +22,9 @@ Run sequentially. Any failure → fix before proceeding.
 
 2. **Watchlist non-empty.** The trigger rule requires `ticker ∈ watchlist`.
    ```bash
-   /home/ziwei-huang/miniconda3/bin/python -m cli.main forge watchlist list
+   docker compose exec triage python -m cli.main forge watchlist list
    ```
-   If empty: `/home/ziwei-huang/miniconda3/bin/python -m cli.main forge watchlist add AAPL` (and the user's other standing tickers).
+   If empty: `docker compose exec triage python -m cli.main forge watchlist add AAPL` (and the user's other standing tickers).
 
 3. **Tickers reference table seeded.**
    ```bash
@@ -34,7 +34,7 @@ Run sequentially. Any failure → fix before proceeding.
 
 4. **All cost guards confirmed OFF.** Gate observes the natural profile.
    ```bash
-   /home/ziwei-huang/miniconda3/bin/python - <<'EOF'
+   docker compose exec triage python - <<'EOF'
    from tradingagents.default_config import DEFAULT_CONFIG as C
    for k in ("cost_guard_enabled", "trigger_backpressure_enabled",
              "trigger_daily_rate_enabled", "daily_budget_enabled"):
@@ -45,8 +45,9 @@ Run sequentially. Any failure → fix before proceeding.
 
 5. **Synthetic smoke passes on the current commit.**
    ```bash
-   cd /home/ziwei-huang/TradingAgents/TradingAgents
-   /home/ziwei-huang/miniconda3/bin/python -m pytest tests/smoke/test_f4_exit_gate.py -v
+   cd /opt/iic-forge
+   docker compose --profile runtime --profile sources --profile dashboard up -d
+   python -m pytest tests/smoke/test_f4_exit_gate.py -v
    ```
    Must PASS.
 
@@ -58,14 +59,16 @@ Run sequentially. Any failure → fix before proceeding.
 
 7. **Promoter + worker units installed and enabled.**
    ```bash
-   # The redis-server.service docker alias should already be installed from F3;
-   # re-copy it here so a standalone F4 bring-up also satisfies the sensing/triage
-   # Requires=redis-server.service dependency.
-   sudo cp ops/systemd/redis-server.service \
+   # The iic-forge-compose.service supervisor owns Redis via Compose.
+   # Install it and the per-daemon units, then bring up Redis via Compose
+   # before starting the host-side promoter and worker units.
+   sudo cp ops/systemd/iic-forge-compose.service \
            ops/systemd/iic-promoter.service ops/systemd/iic-worker.service \
            /etc/systemd/system/
    sudo systemctl daemon-reload
-   sudo systemctl start redis-server.service
+   cd /opt/iic-forge
+   docker compose --profile runtime --profile sources --profile dashboard up -d redis
+   docker compose exec redis redis-cli ping
    sudo systemctl enable --now iic-promoter iic-worker
    ```
 
@@ -88,7 +91,7 @@ Run sequentially. Any failure → fix before proceeding.
 4. **At window end, run the evaluator.**
    ```bash
    F4_GATE_SINCE=$(cat /tmp/f4_gate_since)
-   /home/ziwei-huang/miniconda3/bin/python scripts/f4_exit_gate.py --since "$F4_GATE_SINCE" --window-hours 12 \
+   python scripts/f4_exit_gate.py --since "$F4_GATE_SINCE" --window-hours 12 \
        > docs/superpowers/artifacts/$(date -u +%Y-%m-%d)-f4-exit-gate-report.md
    ```
 
@@ -119,4 +122,4 @@ Cited from spec §9:
 | Worker restarts > 0 | OOM during persona fan-out, or an unhandled exception outside `drain_one`'s try/except | check `journalctl -u iic-worker` for `Killed (out of memory)`; raise `MemoryMax` if needed |
 | Latency p95 > 15 min | personas slow, LLM upstream lag, queue backlog | check per-job timing in the artifact; consider falling back to `quick_think_llm` for the synthesis call (open question #2 in the spec) |
 | 0 briefs during window | quiet news period or watchlist too small | spec §9 explicitly: re-run during an active window; do not pad with synthetic |
-| `error` state jobs | LLM crash, malformed event, timeout | inspect `queue_jobs.error` via `/home/ziwei-huang/miniconda3/bin/python -m cli.main forge orchestrator status`; the underlying `runs` rows have artifacts under `data/runs/<run_id>/` |
+| `error` state jobs | LLM crash, malformed event, timeout | inspect `queue_jobs.error` via `docker compose exec triage python -m cli.main forge orchestrator status`; the underlying `runs` rows have artifacts under `data/runs/<run_id>/` |
