@@ -51,7 +51,14 @@ def test_compose_keeps_local_llm_external_and_configured_by_env():
     data = yaml.safe_load(text)
     for name in ("triage", "promoter"):
         service = data["services"][name]
-        assert "ops/env.iic-forge.example" in service["env_file"]
+        env_file = service["env_file"]
+        # Template entry (string) must still be present
+        assert "ops/env.iic-forge.example" in env_file
+        # Operator .env overlay entry (long-syntax dict, required=false) must also be present
+        assert any(
+            isinstance(item, dict) and item.get("path") == ".env" and item.get("required") is False
+            for item in env_file
+        ), f"Missing optional .env overlay entry in env_file for service '{name}': {env_file}"
         assert any("LOCAL_LLM_BASE_URL" in str(item) for item in service.get("environment", []))
 
 
@@ -68,8 +75,15 @@ def test_env_template_covers_launch_configuration():
         "IIC_DELIVERY_POLICY=ordered_telegram_email",
         "IIC_WORKER_DEEP_CONCURRENCY=1",
         "IIC_SOURCE_STALE_AFTER_SECONDS=1800",
+        # Fix A3: SMTP enabled lever
+        "IIC_SMTP_ENABLED=false",
+        # Fix A5: missing data-source API keys and gate spend flag
+        "FRED_API_KEY=",
+        "DEEPSEEK_API_KEY=",
+        "X_BEARER_TOKEN=",
+        "IIC_ALLOW_API_CLASSIFICATION_SPEND=false",
     ]
     for needle in required:
-        assert needle in text
+        assert needle in text, f"Missing required env template entry: {needle!r}"
     assert "TradingAgents/TradingAgents" not in text
     assert "iic-redis" not in text

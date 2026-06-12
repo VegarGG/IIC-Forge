@@ -22,6 +22,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_IIC_DATA_DIR":         "iic_data_dir",
     "TRADINGAGENTS_COST_GUARD_ENABLED":   "cost_guard_enabled",
     "TRADINGAGENTS_ORCHESTRATOR_ENABLED": "orchestrator_enabled",
+    # F3 sensing Redis URL — without this, all containers dial localhost
+    "TRADINGAGENTS_SENSING_REDIS_URL":    "sensing_redis_url",
     # Focused soak gate thresholds (Task 11)
     "IIC_SOURCE_STALE_AFTER_SECONDS":    "source_stale_after_seconds",
     "IIC_DEFERRED_RETRY_MAX_PENDING":    "deferred_retry_max_pending",
@@ -117,6 +119,43 @@ def _apply_nested_env_overrides(config: dict) -> dict:
         val = os.environ.get(env_var)
         if val is not None and val.strip() != "":
             config.setdefault("llm_roles", {}).setdefault(role, {})[field] = val
+
+    # LLM fallback levers (IIC-FORGE-05 Fix A4).
+    # IIC_LLM_FALLBACK_MODE applies to BOTH triage_salience and alert_gate roles.
+    # Per-role overrides (OPTIONAL, 2-liner each) are also accepted when set.
+    _fallback_mode = os.environ.get("IIC_LLM_FALLBACK_MODE")
+    if _fallback_mode and _fallback_mode.strip():
+        for _role in ("triage_salience", "alert_gate"):
+            config.setdefault("llm_roles", {}).setdefault(_role, {})["fallback"] = _fallback_mode.strip()
+    # Per-role fallback mode overrides (optional; take precedence over global)
+    _triage_fb = os.environ.get("IIC_TRIAGE_LLM_FALLBACK_MODE")
+    if _triage_fb and _triage_fb.strip():
+        config.setdefault("llm_roles", {}).setdefault("triage_salience", {})["fallback"] = _triage_fb.strip()
+    _gate_fb = os.environ.get("IIC_ALERT_GATE_LLM_FALLBACK_MODE")
+    if _gate_fb and _gate_fb.strip():
+        config.setdefault("llm_roles", {}).setdefault("alert_gate", {})["fallback"] = _gate_fb.strip()
+
+    _fallback_budget = os.environ.get("IIC_LLM_FALLBACK_DAILY_BUDGET")
+    if _fallback_budget and _fallback_budget.strip():
+        _budget_val = float(_fallback_budget)
+        for _role in ("triage_salience", "alert_gate"):
+            config.setdefault("llm_roles", {}).setdefault(_role, {})["fallback_daily_budget"] = _budget_val
+
+    # SMTP env overrides (IIC-FORGE-05 Fix A3).
+    # IIC_SMTP_ENABLED: bool coercion (same pattern as _coerce for bool).
+    # IIC_SMTP_TO_ADDRS: comma-separated email addresses → list[str].
+    # IIC_SMTP_USER / IIC_SMTP_APP_PASSWORD are read directly from env at send
+    # time in tradingagents/delivery/email.py — they do NOT go through config.
+    _smtp_enabled = os.environ.get("IIC_SMTP_ENABLED")
+    if _smtp_enabled is not None and _smtp_enabled.strip() != "":
+        config.setdefault("smtp", {})["enabled"] = (
+            _smtp_enabled.strip().lower() in ("true", "1", "yes", "on")
+        )
+    _smtp_to = os.environ.get("IIC_SMTP_TO_ADDRS")
+    if _smtp_to is not None and _smtp_to.strip() != "":
+        config.setdefault("smtp", {})["to_addrs"] = [
+            addr.strip() for addr in _smtp_to.split(",") if addr.strip()
+        ]
 
     return config
 

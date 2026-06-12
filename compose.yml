@@ -4,8 +4,12 @@ x-app: &app
   build:
     context: .
   image: iic-forge:local
+  # Layered env_file: template ships committed defaults; operator .env overrides.
+  # Long-syntax "required: false" requires Compose >=2.24 (current host qualifies).
   env_file:
     - ops/env.iic-forge.example
+    - path: .env
+      required: false
   volumes:
     - iic_data:/data
   extra_hosts:
