@@ -24,9 +24,34 @@ def _conn():
 
 st.title("IIC-FORGE")
 
-tab_briefs, tab_costs, tab_queue, tab_actions = st.tabs(
-    ["Briefs", "Costs", "Queue", "Actions"]
+tab_ops, tab_briefs, tab_costs, tab_queue, tab_actions = st.tabs(
+    ["Operations", "Briefs", "Costs", "Queue", "Actions"]
 )
+
+with tab_ops:
+    st.header("Operational status")
+    from datetime import datetime, timezone
+    from tradingagents.dashboard.panels.operations import fetch_operations_snapshot
+
+    snap = fetch_operations_snapshot(_conn(), now_ts=datetime.now(timezone.utc).isoformat())
+    source_rows = list(snap["sources"].values())
+    st.subheader("Sources")
+    st.dataframe(source_rows or [{"info": "no source health rows yet"}], use_container_width=True)
+    st.subheader("LLM calls")
+    llm_rows = [{"role": role, **values} for role, values in snap["llm_calls"].items()]
+    st.dataframe(llm_rows or [{"info": "no llm call rows yet"}], use_container_width=True)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Deferred pending", snap["deferred_salience"].get("pending", 0))
+    c2.metric("Deferred dead", snap["deferred_salience"].get("dead", 0))
+    c3.metric("Deferred orphaned", snap["deferred_salience"].get("orphaned_events", 0))
+    c4.metric("Failed delivery groups", len(snap["delivery_groups"]["failed"]))
+    c5.metric("Skipped-only groups", snap["delivery_groups"]["skipped_only"])
+    st.subheader("Queue lanes")
+    lane_rows = [
+        {"lane": lane, **states}
+        for lane, states in snap["queue_lanes"].items()
+    ]
+    st.dataframe(lane_rows or [{"info": "no queue jobs yet"}], use_container_width=True)
 
 with tab_briefs:
     st.header("Recent briefs")
