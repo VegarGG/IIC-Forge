@@ -562,24 +562,37 @@ async def _consume_forever(self, *, group: str, consumer: str, stream: str,
                             block_ms: int, batch: int,
                             min_idle_ms: int = 60000,
                             dead_stream: Optional[str] = None,
-                            max_deliveries: int = 5) -> None:
+                            max_deliveries: int = 5,
+                            process_retries: bool = False) -> None:
     while True:
-        # Run due deferred-salience retries before consuming new Redis entries.
-        # Exceptions here must not kill the consumer loop.
-        try:
-            now_ts = datetime.now(timezone.utc).isoformat()
-            reclaim_stale_running(self._conn, now_ts)
-            await run_due_retries_once(
-                self._conn,
-                triage=self,
-                now_ts=now_ts,
-                limit=25,
-                max_attempts=5,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("deferred retry processing failed (non-fatal)")
+        # Deferred-salience retry processing is intentionally single-claimer:
+        # only the consumer with process_retries=True (consumer index 0 in
+        # _main) runs reclaim_stale_running + run_due_retries_once.  All other
+        # consumers skip this block entirely.  This prevents N consumers from
+        # redundantly contending on retry-table writes every tick and, more
+        # critically, eliminates a race where consumer B's reclaim re-pends a
+        # row that consumer A is actively processing (slow LLM batch >
+        # RECLAIM_RUNNING_AFTER_SECONDS = 1800 s) — which would cause
+        # double-scoring of the same event.
+        #
+        # RECLAIM_RUNNING_AFTER_SECONDS (1800 s) must stay above the
+        # worst-case wall time of a full retry batch so that a legitimately
+        # in-progress batch is never reclaimed mid-flight.
+        if process_retries:
+            try:
+                now_ts = datetime.now(timezone.utc).isoformat()
+                reclaim_stale_running(self._conn, now_ts)
+                await run_due_retries_once(
+                    self._conn,
+                    triage=self,
+                    now_ts=now_ts,
+                    limit=25,
+                    max_attempts=5,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("deferred retry processing failed (non-fatal)")
 
         try:
             await self.consume_once(group=group, consumer=consumer,
@@ -816,6 +829,8 @@ def _main() -> None:
                 await asyncio.sleep(60)
 
         # N consumers + refresher + reaper.
+        # Consumer 0 is the designated retry processor (process_retries=True);
+        # all others skip retry processing to avoid contention and double-scoring.
         tasks = [refresher(), reaper()]
         for i in range(C["sensing_triage_consumers"]):
             tasks.append(t.consume_forever(
@@ -828,6 +843,7 @@ def _main() -> None:
                 min_idle_ms=60000,
                 dead_stream=C["sensing_dead_stream"],
                 max_deliveries=C["sensing_triage_max_failures"],
+                process_retries=(i == 0),
             ))
         await asyncio.gather(*tasks)
 

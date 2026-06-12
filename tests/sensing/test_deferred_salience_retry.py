@@ -529,3 +529,68 @@ def test_schedule_same_payload_twice_dedupes(tmp_path):
     assert len(all_rows) == 2, (
         f"Expected 2 total rows (1 done + 1 new pending), got {len(all_rows)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-trip test: envelope → payload_json → envelope_from_payload
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_envelope_payload_round_trip(tmp_path):
+    """Verify that serializing an Envelope via the same payload-json path
+    schedule_deferred_retry uses (internal ``_payload`` + ``json.dumps``) and
+    then deserializing with ``envelope_from_payload`` reproduces every field
+    exactly, including non-trivial source_tags (dict with list values),
+    external_id, and raw_path.
+    """
+    import json
+    from tradingagents.sensing.deferred_retry import (
+        schedule_deferred_retry,
+        envelope_from_payload,
+    )
+    from tradingagents.persistence.db import connect
+
+    conn = connect(str(tmp_path / "iic.db"))
+
+    original = Envelope(
+        source="bloomberg",
+        ingested_ts="2026-06-12T09:30:00+00:00",
+        external_id="bb:eq:12345",
+        text="Fed holds rates; markets rally sharply",
+        source_tags={
+            "tickers": ["SPY", "QQQ"],
+            "tags": ["macro", "rates"],
+            "priority": ["high"],
+        },
+        raw_path="/data/events/staging/bb_12345.json",
+    )
+
+    # schedule_deferred_retry internally calls json.dumps(_payload(env))
+    # and stores the result as payload_json.  Retrieve it from the DB row
+    # so we exercise exactly the same serialisation path.
+    retry_id = schedule_deferred_retry(
+        conn,
+        env=original,
+        event_id="ev-round-trip",
+        reason="llm_error",
+        now_ts="2026-06-12T09:30:00+00:00",
+        base_delay_seconds=60,
+    )
+    row = store.fetch_deferred_salience_retries(conn)[0]
+    assert row["retry_id"] == retry_id
+
+    payload_json = row["payload_json"]
+
+    # Deserialise via the public helper.
+    reconstructed = envelope_from_payload(payload_json)
+
+    assert reconstructed.source == original.source
+    assert reconstructed.ingested_ts == original.ingested_ts
+    assert reconstructed.external_id == original.external_id
+    assert reconstructed.text == original.text
+    assert reconstructed.raw_path == original.raw_path
+    # source_tags must round-trip including nested list values.
+    assert reconstructed.source_tags == original.source_tags, (
+        f"source_tags mismatch:\n  original:      {original.source_tags}\n"
+        f"  reconstructed: {reconstructed.source_tags}"
+    )

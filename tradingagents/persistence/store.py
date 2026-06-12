@@ -929,7 +929,7 @@ def claim_due_deferred_salience_retries(
     limit: int,
 ) -> list[dict]:
     # Atomic claim: single UPDATE ... RETURNING prevents double-claiming when
-    # multiple claimers race (requires SQLite >= 3.35, available since 3.51.2).
+    # multiple claimers race (requires SQLite >= 3.35.0 (RETURNING support)).
     # Returned rows carry POST-increment attempt_count (first claim = 1).
     rows = conn.execute(
         "UPDATE deferred_salience_retry "
