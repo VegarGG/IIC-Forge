@@ -48,7 +48,18 @@ class XAdapter:
     async def poll_once(self, *, redis: aioredis.Redis, conn: sqlite3.Connection) -> int:
         token = os.environ.get("X_BEARER_TOKEN")
         if not token:
-            log.warning("X_BEARER_TOKEN not set; skipping x poll"); return 0
+            log.warning("X_BEARER_TOKEN not set; skipping x poll")
+            try:
+                record_poll_failure(
+                    conn,
+                    source=NAME,
+                    service_name="adapter-x",
+                    error="X_BEARER_TOKEN not set",
+                    diagnostics={},
+                )
+            except Exception:
+                log.exception("x: health write failed (non-fatal)")
+            return 0
         cs = CursorStore(conn)
         since_id = cs.get(NAME)
         try:
@@ -80,7 +91,7 @@ class XAdapter:
                     source=NAME,
                     service_name="adapter-x",
                     emitted=0,
-                    cursor=since_id or None,
+                    cursor=None,
                     last_event_ts=None,
                     diagnostics={"query": self._query},
                 )
