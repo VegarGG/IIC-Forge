@@ -909,25 +909,38 @@ def claim_due_deferred_salience_retries(
     now_ts: str,
     limit: int,
 ) -> list[dict]:
-    # Not safe for concurrent claimers: SELECT-then-UPDATE can double-claim.
-    # Single triage process only, until converted to atomic UPDATE..RETURNING.
+    # Atomic claim: single UPDATE ... RETURNING prevents double-claiming when
+    # multiple claimers race (requires SQLite >= 3.35, available since 3.51.2).
+    # Returned rows carry POST-increment attempt_count (first claim = 1).
     rows = conn.execute(
-        "SELECT * FROM deferred_salience_retry "
-        "WHERE state = 'pending' AND datetime(next_attempt_ts) <= datetime(?) "
-        "ORDER BY next_attempt_ts, retry_id LIMIT ?",
-        (now_ts, int(limit)),
+        "UPDATE deferred_salience_retry "
+        "SET state='running', attempt_count=attempt_count+1, "
+        "last_attempt_ts=?, updated_ts=? "
+        "WHERE retry_id IN ("
+        "    SELECT retry_id FROM deferred_salience_retry "
+        "    WHERE state='pending' AND datetime(next_attempt_ts) <= datetime(?) "
+        "    ORDER BY next_attempt_ts, retry_id LIMIT ?"
+        ") RETURNING *",
+        (now_ts, now_ts, now_ts, int(limit)),
     ).fetchall()
-    ids = [r["retry_id"] for r in rows]
-    if ids:
-        placeholders = ",".join("?" for _ in ids)
-        conn.execute(
-            f"UPDATE deferred_salience_retry SET state = 'running', "
-            f"attempt_count = attempt_count + 1, last_attempt_ts = ?, updated_ts = ? "
-            f"WHERE retry_id IN ({placeholders})",
-            (now_ts, now_ts, *ids),
-        )
-        conn.commit()
+    conn.commit()
     return [dict(r) for r in rows]
+
+
+def reclaim_stale_running_retries(
+    conn: sqlite3.Connection,
+    *,
+    older_than_ts: str,
+) -> int:
+    """Re-pend running rows whose last update is older than the cutoff (claimer died)."""
+    now = _now_iso()
+    cur = conn.execute(
+        "UPDATE deferred_salience_retry SET state='pending', updated_ts=? "
+        "WHERE state='running' AND datetime(updated_ts) <= datetime(?)",
+        (now, older_than_ts),
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 def reschedule_deferred_salience_retry(

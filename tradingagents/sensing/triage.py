@@ -29,6 +29,9 @@ from tradingagents.llm_clients.ledger import record_llm_error, record_llm_succes
 from tradingagents.persistence.store import (
     insert_event, insert_event_ticker,
 )
+from tradingagents.sensing.deferred_retry import (
+    reclaim_stale_running, run_due_retries_once, schedule_deferred_retry,
+)
 from tradingagents.sensing.dedupe import DedupeStage1, DedupeStage2
 from tradingagents.sensing.envelope import Envelope
 from tradingagents.sensing.salience import SalienceScorer, SalienceResult
@@ -304,6 +307,19 @@ class Triage:
                 status="triaged", deduped_of=None,
                 salience_source="deferred",
             )
+            try:
+                schedule_deferred_retry(
+                    self._conn,
+                    env=env,
+                    event_id=ev_id,
+                    reason=score.reason,
+                    now_ts=datetime.now(timezone.utc).isoformat(),
+                    base_delay_seconds=60,
+                )
+            except Exception:
+                log.exception(
+                    "schedule_deferred_retry failed for event %s (non-fatal)", ev_id
+                )
             log.warning(
                 "salience deferred (%s): event %s recorded un-scored; dedupe "
                 "recording skipped so a redelivery re-scores", score.reason,
@@ -536,6 +552,23 @@ async def _consume_forever(self, *, group: str, consumer: str, stream: str,
                             dead_stream: Optional[str] = None,
                             max_deliveries: int = 5) -> None:
     while True:
+        # Run due deferred-salience retries before consuming new Redis entries.
+        # Exceptions here must not kill the consumer loop.
+        try:
+            now_ts = datetime.now(timezone.utc).isoformat()
+            reclaim_stale_running(self._conn, now_ts)
+            await run_due_retries_once(
+                self._conn,
+                triage=self,
+                now_ts=now_ts,
+                limit=25,
+                max_attempts=5,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("deferred retry processing failed (non-fatal)")
+
         try:
             await self.consume_once(group=group, consumer=consumer,
                                      stream=stream, block_ms=block_ms,
