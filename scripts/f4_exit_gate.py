@@ -14,6 +14,13 @@ For the approval-through-delivery gate that spans F4 and F5, use:
 
 from __future__ import annotations
 
+try:
+    from scripts._repo_bootstrap import ensure_repo_root_on_path
+except ModuleNotFoundError:
+    from _repo_bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
+
 import argparse
 import os
 import sqlite3
