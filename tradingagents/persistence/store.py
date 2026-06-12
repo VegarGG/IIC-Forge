@@ -909,6 +909,8 @@ def claim_due_deferred_salience_retries(
     now_ts: str,
     limit: int,
 ) -> list[dict]:
+    # Not safe for concurrent claimers: SELECT-then-UPDATE can double-claim.
+    # Single triage process only, until converted to atomic UPDATE..RETURNING.
     rows = conn.execute(
         "SELECT * FROM deferred_salience_retry "
         "WHERE state = 'pending' AND datetime(next_attempt_ts) <= datetime(?) "
