@@ -22,6 +22,11 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_IIC_DATA_DIR":         "iic_data_dir",
     "TRADINGAGENTS_COST_GUARD_ENABLED":   "cost_guard_enabled",
     "TRADINGAGENTS_ORCHESTRATOR_ENABLED": "orchestrator_enabled",
+    # Focused soak gate thresholds (Task 11)
+    "IIC_SOURCE_STALE_AFTER_SECONDS":    "source_stale_after_seconds",
+    "IIC_DEFERRED_RETRY_MAX_PENDING":    "deferred_retry_max_pending",
+    "IIC_DELIVERY_FAILED_GROUP_MAX":     "delivery_failed_group_max",
+    "IIC_ALLOW_API_CLASSIFICATION_SPEND": "allow_api_classification_spend",
 }
 
 
@@ -314,6 +319,18 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
         "schedule_local_time": "07:00",
         "watchlist_source": "db",
     },
+    # ============================================================
+    # Focused soak gate thresholds (Task 11)
+    # ============================================================
+    # Max age (seconds) before a source is considered stale. 1800 = 30 min.
+    "source_stale_after_seconds": 1800,
+    # Max pending deferred-salience-retry rows. 0 = none expected in soak.
+    "deferred_retry_max_pending": 0,
+    # Max failed delivery groups. 0 = none expected in soak.
+    "delivery_failed_group_max": 0,
+    # When False, any API-provider classification call (triage_salience or
+    # alert_gate with provider != 'local') fails the soak gate.
+    "allow_api_classification_spend": False,
     # Per-role LLM routing. Each entry resolves role -> override -> global default
     # via create_role_llm() (Task 5). Defaults are all-None so production behavior
     # is unchanged until the env vars below are set (shadow/cutover = config-only).
