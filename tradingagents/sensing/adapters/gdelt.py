@@ -87,6 +87,11 @@ class GdeltAdapter:
             await writer.write(env, raw_payload=art, cursor=seen)
             emitted += 1
             new_cursor = max(seen, new_cursor)
+        # DateDesc iteration means the LAST per-article cursor write above is
+        # the OLDEST seendate — left as-is, every later poll re-emits the newer
+        # part of the window. Persist the true max once (same fix as macro).
+        if emitted:
+            cs.set(NAME, new_cursor)
         try:
             record_poll_success(
                 conn,
