@@ -15,6 +15,7 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List
 
 import redis.asyncio as aioredis
@@ -27,6 +28,14 @@ from tradingagents.sensing.source_health import record_poll_success
 
 log = logging.getLogger(__name__)
 NAME = "telegram"
+
+
+def _ensure_session_dir(session_path: str) -> None:
+    """Create the parent directory for the Telethon session file if missing.
+
+    A missing /data/telegram directory must not crash-loop the adapter.
+    """
+    Path(session_path).parent.mkdir(parents=True, exist_ok=True)
 
 
 async def _on_message(event, *, redis, conn, stream: str, staging_root: str) -> None:
@@ -96,6 +105,7 @@ def _main() -> None:
     conn = connect(C["iic_db_path"])
     staging = os.path.join(C["iic_data_dir"], "events", "staging")
 
+    _ensure_session_dir(session)
     client = TelegramClient(session, int(api_id), api_hash)
 
     @client.on(events.NewMessage(chats=channels))

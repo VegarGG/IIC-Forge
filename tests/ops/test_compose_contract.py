@@ -40,6 +40,7 @@ def test_compose_defines_iic_owned_runtime_services():
     assert services["dashboard"]["ports"] == ["${DASHBOARD_PORT:-8501}:8501"]
     assert "iic_redis_data" in data["volumes"]
     assert "iic_data" in data["volumes"]
+    assert data["volumes"]["iic_data"]["driver_opts"]["device"] == "/srv/iic-forge/data"
 
 
 @pytest.mark.unit

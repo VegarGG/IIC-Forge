@@ -6,6 +6,25 @@ the repo root (`/opt/iic-forge` on the production host).
 
 ---
 
+## Prerequisites
+
+Provision the host before first launch:
+
+```bash
+git clone <repo-url> /opt/iic-forge && cd /opt/iic-forge && git checkout <release-tag>
+sudo mkdir -p /srv/iic-forge/data /srv/iic-forge/backups
+# chown the directories to the user that will run docker compose, e.g.:
+# sudo chown $USER:$USER /srv/iic-forge/data /srv/iic-forge/backups
+```
+
+Docker and the Compose plugin are assumed to be installed on the host.
+
+The `/srv/iic-forge/data` directory backs the `iic_data` named volume (bind-mounted
+at `/data` inside containers). It must exist before `docker compose up` — Docker
+will refuse to create the bind-backed volume if the device path is absent.
+
+---
+
 ## Launch
 
 ```bash
@@ -13,7 +32,6 @@ cd /opt/iic-forge
 cp ops/env.iic-forge.example .env
 $EDITOR .env
 docker compose --profile runtime --profile sources --profile dashboard up -d
-python scripts/focused_soak_gate.py --mode preflight --json
 ```
 
 **Important:** copy `ops/env.iic-forge.example` to `.env` and edit the copy.
@@ -74,6 +92,21 @@ proceeding.
 
 ---
 
+## Launch Preflight Gate
+
+Run the preflight gate **after** old services are stopped (the
+`old_services_stopped` check will false-FAIL if legacy units are still active):
+
+```bash
+# The host shell does not load .env; app data is bind-mounted from
+# /srv/iic-forge/data, so the DB path must be supplied explicitly.
+TRADINGAGENTS_IIC_DB_PATH=/srv/iic-forge/data/iic.db python scripts/focused_soak_gate.py --mode preflight --json
+```
+
+Gate success = exit code 0 and `"pass": true` in JSON output.
+
+---
+
 ## Redis Ownership
 
 Redis is owned by the `redis` service in `compose.yml` backed by the
@@ -90,6 +123,16 @@ Expected: `PONG`, `appendonly yes`, and your configured eviction policy.
 
 The focused soak gate check `redis_owned_and_configured` passes only when
 `appendonly = yes`.
+
+---
+
+## Storage Layout
+
+Inside containers the app data volume is mounted at `/data`. On the host the
+same files are visible at `/srv/iic-forge/data` because `iic_data` is a
+bind-backed named volume (driver: local, type: none, bind). This means host
+tools — the soak gate, sqlite3, rollback scripts — read and write the same
+files that containers see.
 
 ---
 
@@ -188,6 +231,9 @@ for row in c.fetchall():
 The gate check `delivery_groups_bounded` fails when any delivery group has zero
 sent rows and at least one failed attempt.
 
+healthy at launch: empty or only sent/skipped rows in the deliveries table (no
+failed rows expected before any alert cycle completes).
+
 ---
 
 ## Worker Lanes
@@ -214,15 +260,22 @@ for row in c.fetchall():
 "
 ```
 
+healthy at launch: no lane=action rows in queue_jobs (idle by design); worker-deep
+may show zero rows if no deep-analysis cycle has run yet.
+
 ---
 
 ## Focused Soak
 
-Run the focused soak gate after at least one full triage + alert cycle:
+Run the focused soak gate after at least one full triage + alert cycle.
+The host shell does not load `.env`; the DB path must be supplied explicitly
+because app data lives in the bind-mounted `/srv/iic-forge/data` directory:
 
 ```bash
-python scripts/focused_soak_gate.py --mode soak --json
+TRADINGAGENTS_IIC_DB_PATH=/srv/iic-forge/data/iic.db python scripts/focused_soak_gate.py --mode soak --json
 ```
+
+Gate success = exit code 0 and `"pass": true` in JSON output.
 
 The 8 check names (stable, referenced in alerts and runbooks):
 
@@ -242,7 +295,7 @@ not yet produced evidence. All other checks run in both modes.
 Preflight gate (before first triage cycle):
 
 ```bash
-python scripts/focused_soak_gate.py --mode preflight --json
+TRADINGAGENTS_IIC_DB_PATH=/srv/iic-forge/data/iic.db python scripts/focused_soak_gate.py --mode preflight --json
 ```
 
 ---
@@ -271,14 +324,15 @@ docker compose down
 
 ```bash
 git checkout <previous-sha>
-# or: docker pull iic-forge:<previous-tag>
 ```
 
 3. Restore SQLite and Redis data from `ops/backup.sh` output if the rollback
    requires prior state:
 
 ```bash
-# SQLite: copy saved data/ back to /srv/iic-forge/data/
+# SQLite: restore the database file directly (stack must be stopped first):
+cp /srv/iic-forge/backups/<stamp>/iic.db /srv/iic-forge/data/iic.db
+
 # Redis: copy redis-dump.rdb into the volume and restart
 docker run --rm \
   -v iic-forge_iic_redis_data:/data \
@@ -290,13 +344,13 @@ docker run --rm \
 4. Restart Compose from the restored revision:
 
 ```bash
-docker compose --profile runtime --profile sources --profile dashboard up -d
+docker compose --profile runtime --profile sources --profile dashboard up -d --build
 ```
 
 5. Run preflight again to confirm the rolled-back state is clean:
 
 ```bash
-python scripts/focused_soak_gate.py --mode preflight --json
+TRADINGAGENTS_IIC_DB_PATH=/srv/iic-forge/data/iic.db python scripts/focused_soak_gate.py --mode preflight --json
 ```
 
 ---
@@ -314,7 +368,8 @@ Key variables in `ops/env.iic-forge.example`:
 | `IIC_DELIVERY_POLICY` | Delivery policy (`ordered_telegram_email`) |
 | `IIC_WORKER_DEEP_CONCURRENCY` | Deep-analysis worker slots (default 1) |
 | `IIC_SOURCE_STALE_AFTER_SECONDS` | Freshness threshold for gate check (default 1800) |
-| `IIC_DEFERRED_RETRY_MAX_PENDING` | Gate threshold for pending retries (default 0) |
+| `IIC_DEFERRED_RETRY_MAX_PENDING` | Gate threshold for pending retries (gate default 0 = strict; `ops/env.iic-forge.example` sets 100 for operational headroom) |
+| `IIC_DELIVERY_FAILED_GROUP_MAX` | Maximum failed delivery groups before gate fails |
 | `DASHBOARD_PORT` | Streamlit dashboard host port (default 8501) |
 
 Never edit `ops/env.iic-forge.example` in place. The example file is

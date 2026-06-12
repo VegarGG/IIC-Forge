@@ -134,4 +134,11 @@ services:
 
 volumes:
   iic_redis_data:
+  # bind-backed so host-run gates/backups/rollbacks see the same files containers
+  # see at /data; the directory must exist before `up` (runbook Prerequisites).
   iic_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/iic-forge/data

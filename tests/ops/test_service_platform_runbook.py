@@ -18,6 +18,8 @@ def test_service_platform_runbook_covers_launch_and_rollback():
         "Deferred Salience Retry",
         "Delivery Fallback",
         "Rollback",
+        "TRADINGAGENTS_IIC_DB_PATH=/srv/iic-forge/data/iic.db",
+        "Prerequisites",
     ]
     for needle in required:
         assert needle in text, f"Missing required string: {needle!r}"

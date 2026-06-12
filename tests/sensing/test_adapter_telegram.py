@@ -2,6 +2,7 @@ import json
 import pytest
 import fakeredis.aioredis
 from unittest.mock import MagicMock
+from pathlib import Path
 
 from tradingagents.persistence.db import connect
 
@@ -50,3 +51,29 @@ async def test_telegram_handler_skips_empty_messages(conn, tmp_path):
                       stream="ingest:raw",
                       staging_root=str(tmp_path / "s"))
     assert await r.xlen("ingest:raw") == 0
+
+
+@pytest.mark.unit
+def test_ensure_session_dir_creates_missing_parent(tmp_path):
+    """_ensure_session_dir must create a missing parent so the adapter does not crash-loop."""
+    from tradingagents.sensing.adapters.telegram import _ensure_session_dir
+
+    session_path = str(tmp_path / "telegram" / "iic_sensing.session")
+    parent = Path(session_path).parent
+    assert not parent.exists(), "precondition: parent dir must not exist yet"
+
+    _ensure_session_dir(session_path)
+
+    assert parent.exists(), "_ensure_session_dir must create the parent directory"
+    assert parent.is_dir()
+
+
+@pytest.mark.unit
+def test_ensure_session_dir_idempotent(tmp_path):
+    """Calling _ensure_session_dir twice must not raise."""
+    from tradingagents.sensing.adapters.telegram import _ensure_session_dir
+
+    session_path = str(tmp_path / "deep" / "nested" / "iic_sensing.session")
+    _ensure_session_dir(session_path)
+    _ensure_session_dir(session_path)  # must not raise
+    assert Path(session_path).parent.is_dir()
