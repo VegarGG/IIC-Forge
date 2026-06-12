@@ -18,6 +18,7 @@ import requests
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.sensing.source_health import record_poll_failure, record_poll_success
 
 
 log = logging.getLogger(__name__)
@@ -78,17 +79,42 @@ class MacroAdapter:
     async def poll_once(self, *, redis: aioredis.Redis, conn: sqlite3.Connection) -> int:
         writer = EnvelopeWriter(source=NAME, redis=redis, conn=conn,
                                  stream=self._stream, staging_root=self._staging)
-        n = await self._poll_fred(redis, conn, writer)
+        emitted = await self._poll_fred(redis, conn, writer)
         # TE is intentionally a no-op until TRADINGECONOMICS_KEY ships.
-        return n
+        # Read cursor after poll so we report the updated value.
+        cursor = CursorStore(conn).get(NAME)
+        try:
+            record_poll_success(
+                conn,
+                source=NAME,
+                service_name="adapter-macro",
+                emitted=emitted,
+                cursor=cursor or None,
+                last_event_ts=datetime.now(timezone.utc).isoformat() if emitted else None,
+                diagnostics={"provider": "fred"},
+            )
+        except Exception:
+            log.exception("macro: health write failed (non-fatal)")
+        return emitted
 
     async def stream(self, *, redis, conn) -> None:
         backoff = 1
         while True:
             try:
                 await self.poll_once(redis=redis, conn=conn); backoff = 1
-            except Exception:
-                log.exception("macro iteration crashed"); backoff = min(backoff * 2, 60)
+            except Exception as e:
+                log.exception("macro iteration crashed")
+                try:
+                    record_poll_failure(
+                        conn,
+                        source=NAME,
+                        service_name="adapter-macro",
+                        error=e,
+                        diagnostics={},
+                    )
+                except Exception:
+                    log.exception("macro: health write failed (non-fatal)")
+                backoff = min(backoff * 2, 60)
             await asyncio.sleep(POLL_INTERVAL if backoff == 1 else backoff)
 
 

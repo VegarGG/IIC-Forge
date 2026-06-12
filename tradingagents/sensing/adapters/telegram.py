@@ -22,6 +22,7 @@ import redis.asyncio as aioredis
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.sensing.source_health import record_poll_success
 
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,18 @@ async def _on_message(event, *, redis, conn, stream: str, staging_root: str) -> 
                                           "message_id": msg.id,
                                           "text": text},
                        cursor=json.dumps(cursors))
+    try:
+        record_poll_success(
+            conn,
+            source=NAME,
+            service_name="adapter-telegram",
+            emitted=1,
+            cursor=json.dumps(cursors),
+            last_event_ts=datetime.now(timezone.utc).isoformat(),
+            diagnostics={"resolved_channels": sorted(cursors.keys())},
+        )
+    except Exception:
+        log.exception("telegram: health write failed (non-fatal)")
 
 
 def _main() -> None:

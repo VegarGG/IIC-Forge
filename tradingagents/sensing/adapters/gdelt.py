@@ -13,6 +13,7 @@ import requests
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.sensing.source_health import record_poll_failure, record_poll_success
 
 
 log = logging.getLogger(__name__)
@@ -51,7 +52,18 @@ class GdeltAdapter:
             r.raise_for_status()
             data = r.json()
         except Exception as e:
-            log.warning("gdelt poll failed: %s", e); return 0
+            log.warning("gdelt poll failed: %s", e)
+            try:
+                record_poll_failure(
+                    conn,
+                    source=NAME,
+                    service_name="adapter-gdelt",
+                    error=e,
+                    diagnostics={"query": self._query},
+                )
+            except Exception:
+                log.exception("gdelt: health write failed (non-fatal)")
+            return 0
 
         writer = EnvelopeWriter(source=NAME, redis=redis, conn=conn,
                                  stream=self._stream, staging_root=self._staging)
@@ -75,6 +87,20 @@ class GdeltAdapter:
             await writer.write(env, raw_payload=art, cursor=seen)
             emitted += 1
             new_cursor = max(seen, new_cursor)
+        try:
+            record_poll_success(
+                conn,
+                source=NAME,
+                service_name="adapter-gdelt",
+                emitted=emitted,
+                cursor=new_cursor or None,
+                last_event_ts=(
+                    datetime.now(timezone.utc).isoformat() if emitted else None
+                ),
+                diagnostics={"query": self._query},
+            )
+        except Exception:
+            log.exception("gdelt: health write failed (non-fatal)")
         return emitted
 
     async def stream(self, *, redis, conn) -> None:
