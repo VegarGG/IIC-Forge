@@ -83,7 +83,7 @@ async def test_retry_runner_marks_done_when_rescored_async(tmp_path):
     )
 
     class FakeTriage:
-        async def process_one(self, retry_env):
+        async def process_one(self, retry_env, *, from_retry=False):
             assert retry_env.external_id == "rss:1"
             return type("Result", (), {"salience": 0.9})()
 
@@ -126,7 +126,7 @@ async def test_retry_runner_reschedules_with_exponential_backoff(tmp_path):
     )
 
     class FakeTriage:
-        async def process_one(self, retry_env):
+        async def process_one(self, retry_env, *, from_retry=False):
             return type("Result", (), {"salience": None})()
 
     count = await run_due_retries_once(
@@ -169,7 +169,7 @@ async def test_retry_reaches_max_attempts_becomes_dead(tmp_path):
     )
 
     class FakeTriage:
-        async def process_one(self, retry_env):
+        async def process_one(self, retry_env, *, from_retry=False):
             return type("Result", (), {"salience": None})()
 
     # First two attempts: reschedule (attempt_count < max_attempts=3 after claim)
@@ -235,7 +235,7 @@ async def test_run_due_retries_with_nothing_due_returns_zero(tmp_path):
     )
 
     class FakeTriage:
-        async def process_one(self, retry_env):
+        async def process_one(self, retry_env, *, from_retry=False):
             raise AssertionError("Should not be called")
 
     count = await run_due_retries_once(
@@ -344,3 +344,188 @@ def test_reclaim_stale_running_row(tmp_path):
     assert len(running) == 1
     fresh_row = [r for r in claimed if r["event_id"] == "ev-fresh"][0]
     assert running[0]["retry_id"] == fresh_row["retry_id"]
+
+
+# ---------------------------------------------------------------------------
+# Bug-fix test 1: retry that defers again must NOT create duplicate rows
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+async def test_retry_that_defers_again_does_not_duplicate_rows(tmp_path):
+    """Guard 1 (from_retry): when a claimed retry re-enters the deferred
+    branch, neither a new deferred event row nor a new retry row must be
+    created.  The runner owns rescheduling of the SINGLE existing retry row.
+
+    Drive:
+      1. process_one() with a scorer that always raises → creates 1 event
+         row (salience_source='deferred') + 1 pending retry row.
+      2. run_due_retries_once() twice (advancing now_ts past backoff each
+         time, scorer still raises) → attempt_count increments but row
+         counts stay at 1 each.
+    """
+    import fakeredis.aioredis
+    from tradingagents.persistence.db import connect
+    from tradingagents.sensing.deferred_retry import run_due_retries_once, schedule_deferred_retry
+    from tradingagents.sensing.embeddings import MockEmbedder
+    from tradingagents.sensing.triage import Triage
+
+    conn = connect(str(tmp_path / "iic.db"))
+
+    def always_raises(_prompt):
+        raise ConnectionError("simulated llm outage")
+
+    r = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    t = Triage(
+        conn=conn,
+        redis=r,
+        embedder=MockEmbedder(),
+        llm_call=always_raises,
+        data_dir=str(tmp_path / "data"),
+    )
+
+    env = Envelope(
+        source="rss",
+        ingested_ts="2026-06-12T10:00:00+00:00",
+        external_id="rss:dedup-test",
+        text="Apple reports a shock earnings beat for Q4",
+        source_tags={"tickers": ["AAPL"]},
+        raw_path="",
+    )
+
+    # Step 1: first process_one → 1 deferred event row + 1 pending retry row.
+    res = await t.process_one(env)
+    assert res.salience is None
+
+    all_events = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE salience_source='deferred'"
+    ).fetchone()[0]
+    assert all_events == 1, f"Expected 1 deferred event row after first process_one, got {all_events}"
+
+    all_retries = store.fetch_deferred_salience_retries(conn)
+    assert len(all_retries) == 1, f"Expected 1 retry row after first process_one, got {len(all_retries)}"
+    original_retry_id = all_retries[0]["retry_id"]
+
+    # Step 2a: run_due_retries_once — scorer still defers; attempt_count becomes 1.
+    # Advance now_ts well past the initial backoff (60 s).
+    count = await run_due_retries_once(
+        conn,
+        triage=t,
+        now_ts="2026-06-12T10:02:00+00:00",
+        limit=10,
+        max_attempts=5,
+    )
+    assert count == 1
+
+    all_events = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE salience_source='deferred'"
+    ).fetchone()[0]
+    assert all_events == 1, (
+        f"Deferred event rows grew after first retry run: {all_events} (expected 1)"
+    )
+    all_retries = store.fetch_deferred_salience_retries(conn)
+    assert len(all_retries) == 1, (
+        f"Retry rows grew after first retry run: {len(all_retries)} (expected 1)"
+    )
+    assert all_retries[0]["retry_id"] == original_retry_id
+    assert all_retries[0]["attempt_count"] == 1
+
+    # Step 2b: second run_due_retries_once — attempt_count becomes 2, still 1 row each.
+    pending = store.fetch_deferred_salience_retries(conn, state="pending")
+    assert pending, "Row should be rescheduled (pending) before second retry run"
+    next_due = pending[0]["next_attempt_ts"]
+    from datetime import timedelta
+    next_due_dt = datetime.fromisoformat(next_due) + timedelta(seconds=1)
+
+    count = await run_due_retries_once(
+        conn,
+        triage=t,
+        now_ts=next_due_dt.isoformat(),
+        limit=10,
+        max_attempts=5,
+    )
+    assert count == 1
+
+    all_events = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE salience_source='deferred'"
+    ).fetchone()[0]
+    assert all_events == 1, (
+        f"Deferred event rows grew after second retry run: {all_events} (expected 1)"
+    )
+    all_retries = store.fetch_deferred_salience_retries(conn)
+    assert len(all_retries) == 1, (
+        f"Retry rows grew after second retry run: {len(all_retries)} (expected 1)"
+    )
+    assert all_retries[0]["retry_id"] == original_retry_id
+    assert all_retries[0]["attempt_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Bug-fix test 2: schedule_deferred_retry dedupes on payload_hash
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_schedule_same_payload_twice_dedupes(tmp_path):
+    """Guard 2 (payload_hash dedupe): scheduling the same envelope twice while
+    the first row is pending/running returns the same retry_id without inserting
+    a new row.  After the row is marked 'done', a third schedule call IS allowed
+    to insert a new row.
+    """
+    from tradingagents.sensing.deferred_retry import schedule_deferred_retry
+    from tradingagents.persistence.db import connect
+
+    conn = connect(str(tmp_path / "iic.db"))
+    env = Envelope(
+        source="rss",
+        ingested_ts="2026-06-12T10:00:00+00:00",
+        external_id="rss:dedupe-payload",
+        text="Dedupe test payload",
+        source_tags={"tickers": ["TSLA"]},
+        raw_path="",
+    )
+
+    # First schedule: inserts a new pending row.
+    rid1 = schedule_deferred_retry(
+        conn,
+        env=env,
+        event_id="ev-first",
+        reason="llm_error",
+        now_ts="2026-06-12T10:00:00+00:00",
+        base_delay_seconds=60,
+    )
+
+    all_rows = store.fetch_deferred_salience_retries(conn)
+    assert len(all_rows) == 1, "Expected exactly 1 row after first schedule"
+
+    # Second schedule with identical envelope: must return SAME retry_id.
+    rid2 = schedule_deferred_retry(
+        conn,
+        env=env,
+        event_id="ev-second",
+        reason="llm_error_again",
+        now_ts="2026-06-12T10:00:05+00:00",
+        base_delay_seconds=60,
+    )
+    assert rid2 == rid1, (
+        f"schedule_deferred_retry returned new id {rid2} instead of existing {rid1}"
+    )
+    all_rows = store.fetch_deferred_salience_retries(conn)
+    assert len(all_rows) == 1, (
+        f"Expected 1 row after duplicate schedule, got {len(all_rows)}"
+    )
+
+    # Mark the row done — dedupe should no longer block a fresh insert.
+    store.mark_deferred_salience_retry_done(conn, retry_id=rid1)
+
+    rid3 = schedule_deferred_retry(
+        conn,
+        env=env,
+        event_id="ev-third",
+        reason="llm_error_new",
+        now_ts="2026-06-12T10:01:00+00:00",
+        base_delay_seconds=60,
+    )
+    assert rid3 != rid1, "Expected a NEW retry_id after old row is done"
+    all_rows = store.fetch_deferred_salience_retries(conn)
+    assert len(all_rows) == 2, (
+        f"Expected 2 total rows (1 done + 1 new pending), got {len(all_rows)}"
+    )

@@ -877,6 +877,25 @@ def fetch_source_health(conn: sqlite3.Connection) -> dict[str, dict]:
     return {r["source"]: dict(r) for r in rows}
 
 
+def find_active_deferred_salience_retry(
+    conn: sqlite3.Connection,
+    *,
+    payload_hash: str,
+) -> Optional[int]:
+    """Return the retry_id of an existing pending or running row for this
+    payload_hash, or None if no such row exists.
+
+    Uses ``idx_deferred_salience_retry_payload`` to avoid a full scan.
+    """
+    row = conn.execute(
+        "SELECT retry_id FROM deferred_salience_retry "
+        "WHERE payload_hash = ? AND state IN ('pending', 'running') "
+        "ORDER BY retry_id LIMIT 1",
+        (payload_hash,),
+    ).fetchone()
+    return int(row["retry_id"]) if row is not None else None
+
+
 def insert_deferred_salience_retry(
     conn: sqlite3.Connection,
     *,

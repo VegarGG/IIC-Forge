@@ -63,13 +63,25 @@ def schedule_deferred_retry(
     base_delay_seconds: int,
 ) -> int:
     payload_json = json.dumps(_payload(env), sort_keys=True)
+    ph = _hash_payload(payload_json)
+    # Guard 2: dedupe on payload_hash — if a pending or running row already
+    # exists for this exact payload, return its id without inserting a new one.
+    # This prevents exponential row growth on Redis redelivery and on any other
+    # call-site that races with an already-scheduled retry for the same event.
+    existing_id = store.find_active_deferred_salience_retry(conn, payload_hash=ph)
+    if existing_id is not None:
+        log.debug(
+            "schedule_deferred_retry: payload_hash %s already has active retry %d, "
+            "skipping insert", ph[:16], existing_id,
+        )
+        return existing_id
     next_attempt = _iso(_parse(now_ts) + timedelta(seconds=base_delay_seconds))
     return store.insert_deferred_salience_retry(
         conn,
         event_id=event_id,
         source=env.source,
         raw_path=env.raw_path,
-        payload_hash=_hash_payload(payload_json),
+        payload_hash=ph,
         payload_json=payload_json,
         reason=reason,
         next_attempt_ts=next_attempt,
@@ -125,7 +137,7 @@ async def run_due_retries_once(
         retry_id = int(row["retry_id"])
         attempt = int(row["attempt_count"])  # POST-increment: first claim = 1
         try:
-            result = await triage.process_one(envelope_from_payload(row["payload_json"]))
+            result = await triage.process_one(envelope_from_payload(row["payload_json"]), from_retry=True)
             handled += 1
             if getattr(result, "salience", None) is not None:
                 store.mark_deferred_salience_retry_done(conn, retry_id=retry_id)

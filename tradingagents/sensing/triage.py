@@ -191,7 +191,7 @@ class Triage:
         self._watchlist = list(tickers)
 
     # ------------------------------------------------------------------
-    async def process_one(self, env: Envelope) -> TriageResult:
+    async def process_one(self, env: Envelope, *, from_retry: bool = False) -> TriageResult:
         """Run the full pipeline on one envelope. Always writes a row."""
         # Stage 1: hash / external_id dedupe.
         hit1 = await self._ds1.check(env)
@@ -295,6 +295,18 @@ class Triage:
         if score.source == "deferred":
             if self._availability_counter is not None:
                 self._availability_counter.record_failure(reason=score.reason)
+            # Guard 1 (from_retry): when re-running a claimed retry, the
+            # original deferred event row and retry row already exist — the
+            # runner owns rescheduling of the original row.  Skip both the
+            # insert_event and schedule_deferred_retry calls to prevent
+            # exponential row growth on repeated defers.
+            if from_retry:
+                log.warning(
+                    "salience still deferred (%s) during retry; runner will "
+                    "reschedule the existing retry row", score.reason,
+                )
+                return TriageResult(event_id="", status="triaged",
+                                    salience=None)
             ev_id = self._new_event_id()
             insert_event(
                 self._conn, event_id=ev_id, source=env.source,
