@@ -15,11 +15,13 @@ def test_redis_conf_has_required_settings():
 
 @pytest.mark.unit
 def test_backup_script_is_executable_and_handles_both_stores():
-    import os, stat
+    import stat
     path = Path("ops/backup.sh")
     text = path.read_text()
-    assert ".backup" in text                     # SQLite
-    assert "BGREWRITEAOF" in text                # Redis rewrite (inside container)
-    assert "docker cp" in text                   # AOF pulled from the iic-redis volume
+    assert "s.backup(d)" in text                 # SQLite online backup API
+    assert "redis-cli SAVE" in text              # synchronous RDB snapshot
+    assert "dump.rdb" in text                    # pulled from the compose redis volume
+    assert "_iic_redis_data" in text
+    assert "_iic_data" in text
     mode = path.stat().st_mode
     assert mode & stat.S_IXUSR
