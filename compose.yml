@@ -82,6 +82,8 @@ services:
       - LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL:-http://host.docker.internal:8080/v1}
     profiles: ["runtime"]
 
+  # No producer routes lane=action at launch; provisioned for later scaling
+  # (design §6/§8); this service will idle until an action-lane producer exists.
   worker-action:
     <<: *app
     entrypoint: ["python", "-m", "tradingagents.orchestrator.worker"]

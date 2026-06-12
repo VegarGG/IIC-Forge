@@ -15,6 +15,7 @@ from typing import Optional
 
 from tradingagents.persistence import store
 from tradingagents.persistence.db import connect
+from tradingagents.orchestrator import queue_store
 from tradingagents.orchestrator.candidates import fetch_candidates, fetch_candidates_grouped
 from tradingagents.orchestrator.guards import QueueBackpressure, QueueRateGuard
 
@@ -39,6 +40,7 @@ def run_once(
     approval_gate_enabled: bool = False,
     pending_ttl_hours: int = 24,
     alert_evaluator=None,
+    deep_lane_timeout_seconds: int = 1200,
 ) -> int:
     """Perform one poll cycle. With the approval gate enabled, composes one
     light alert per event (no study enqueued). Returns the count of light
@@ -124,16 +126,24 @@ def run_once(
     for ev in candidates:
         until_ts = (_now_utc() + timedelta(minutes=cooldown_min)).isoformat()
         try:
-            with conn:    # one atomic tx per event
+            with conn:    # one atomic tx per event (job + suppression)
+                # Use insert_queue_job's canonical column set (lane +
+                # timeout_seconds) inline so the INSERT and suppression upsert
+                # remain atomic; calling insert_queue_job() would commit early
+                # and break the rollback guarantee tested by
+                # test_partial_failure_does_not_leave_orphan_suppression.
                 conn.execute(
                     "INSERT INTO queue_jobs (job_type, payload, state, "
-                    "enqueued_ts, trigger_event_id) VALUES (?, ?, 'queued', ?, ?)",
+                    "enqueued_ts, trigger_event_id, lane, timeout_seconds) "
+                    "VALUES (?, ?, 'queued', ?, ?, ?, ?)",
                     (
                         "event_alert",
                         json.dumps({"event_id": ev["event_id"],
                                     "ticker": ev["ticker"]}),
                         _now_utc().isoformat(),
                         ev["event_id"],
+                        "deep",
+                        deep_lane_timeout_seconds,
                     ),
                 )
                 store.upsert_suppression(
@@ -355,6 +365,9 @@ def main(config: Optional[dict] = None) -> None:
                 approval_gate_enabled=gate_enabled,
                 pending_ttl_hours=cfg["alert_pending_ttl_hours"],
                 alert_evaluator=alert_evaluator,
+                deep_lane_timeout_seconds=cfg.get(
+                    "worker_lane_timeouts", {}
+                ).get("deep", 1200),
             )
         except KeyboardInterrupt:
             log.info("promoter shutting down on KeyboardInterrupt")

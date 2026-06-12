@@ -47,6 +47,10 @@ def lease_one(conn: sqlite3.Connection, *, lane: Optional[str] = None) -> Option
     heartbeat_ts is set to the same timestamp as started_ts on claim.
     """
     lane_filter = "AND lane = ?" if lane is not None else ""
+    # heartbeat_ts is set once at claim time (same value as started_ts).
+    # Periodic in-flight heartbeat updates are future work; the stale-lease
+    # sweep (sweep_stale_leases) uses started_ts + per-job timeout_seconds,
+    # not heartbeat_ts, to determine staleness.
     params = [_now_iso()]
     if lane is not None:
         params.append(lane)
@@ -143,12 +147,17 @@ def sweep_stale_leases(
     conn: sqlite3.Connection, *, max_age_seconds: int = 3600,
     reason: str = "stale_lease_swept_on_boot",
 ) -> int:
-    """Mark any 'running' job older than max_age_seconds as 'error'.
+    """Mark any 'running' job older than its per-job timeout as 'error'.
 
     Used by the worker at boot AND periodically in-loop (S-4) to recover jobs
     left 'running' by an unclean shutdown or a blown wall-clock cap. ``reason``
     is recorded in the error column for post-mortems.
     Returns the number of rows swept.
+
+    Per-job timeout: when ``timeout_seconds`` is set on the row, that value
+    governs staleness; ``max_age_seconds`` is the fallback for rows without a
+    per-job timeout (COALESCE). This means existing tests that don't set
+    ``timeout_seconds`` continue to use the global max_age fallback unchanged.
 
     NOTE: ``started_ts`` is stored as an ISO-8601 string with a 'T' separator
     and a '+00:00' offset, so it MUST be wrapped in ``datetime(...)`` before
@@ -159,8 +168,10 @@ def sweep_stale_leases(
     n = conn.execute(
         "UPDATE queue_jobs SET state = 'error', finished_ts = ?, "
         "error = ? "
-        "WHERE state = 'running' AND datetime(started_ts) < datetime('now', ?)",
-        (_now_iso(), reason, f"-{max_age_seconds} seconds"),
+        "WHERE state = 'running' "
+        "  AND datetime(started_ts) < datetime('now', "
+        "        '-' || CAST(COALESCE(timeout_seconds, ?) AS TEXT) || ' seconds')",
+        (_now_iso(), reason, max_age_seconds),
     ).rowcount
     conn.commit()
     return n

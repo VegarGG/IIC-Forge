@@ -198,6 +198,16 @@ def main(config: Optional[dict] = None) -> None:
     ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drain")
 
     _install_signal_handlers()
+
+    _max_conc = cfg.get("max_concurrent_jobs", 1)
+    if _max_conc > 1:
+        log.warning(
+            "max_concurrent_jobs=%d is not yet active — the worker loop is "
+            "single-flight (one job at a time); effective concurrency is 1. "
+            "Multi-slot support is reserved for a future worker loop revision.",
+            _max_conc,
+        )
+
     log.info("worker started: lane=%s poll=%ss timeout=%dm budget_enabled=%s "
              "sweep_max_age=%ds sweep_interval=%ds",
              cfg.get("worker_lane"), cfg["worker_poll_interval_s"],
