@@ -56,6 +56,13 @@ CLI:
 
 from __future__ import annotations
 
+try:
+    from scripts._repo_bootstrap import ensure_repo_root_on_path
+except ModuleNotFoundError:
+    from _repo_bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
+
 import argparse
 import json
 import os
@@ -65,13 +72,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-
-# Repo-root import guard so `python scripts/shadow_eval.py` works standalone
-# from any cwd even without an installed tradingagents package.  Idempotent;
-# no other import-time side effects (tests import this module directly).
-_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
 
 from tradingagents.persistence import store
 from tradingagents.persistence.db import connect
