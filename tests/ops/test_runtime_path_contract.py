@@ -14,6 +14,7 @@ PRODUCTION_FILES = [
     ROOT / "ops" / "runbooks" / "f3-exit-gate.md",
     ROOT / "ops" / "runbooks" / "f4-exit-gate.md",
     ROOT / "ops" / "runbooks" / "local-llm.md",
+    ROOT / "ops" / "runbooks" / "service-platform.md",
     ROOT / "ops" / "redis" / "redis.conf",
 ]
 

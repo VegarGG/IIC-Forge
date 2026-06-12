@@ -285,6 +285,12 @@ sudo systemctl start iic-telegram-bot
 > `/home/ziwei-huang/TradingAgents/TradingAgents`, logs to journal). Adjust
 > `User=`, `WorkingDirectory=`, and the interpreter path for another host.
 
+### Production Runtime
+
+The canonical production runtime is Docker Compose. See
+`ops/runbooks/service-platform.md` for launch, rollback, Redis ownership,
+external local LLM, deferred retry, and focused soak procedures.
+
 ## Design decisions
 
 - **Stateful Secretary from F1** — not a passive post-processor. It owns run
