@@ -402,3 +402,87 @@ CREATE TABLE IF NOT EXISTS ops_counters (
     value      INTEGER NOT NULL DEFAULT 0,
     updated_ts TEXT NOT NULL
 );
+
+-- ============================================================
+-- Service platform reconstruction control plane
+-- ============================================================
+CREATE TABLE IF NOT EXISTS llm_calls (
+    call_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_ts         TEXT NOT NULL,
+    role               TEXT NOT NULL,
+    service_name       TEXT NOT NULL,
+    provider           TEXT NOT NULL,
+    model_id           TEXT NOT NULL,
+    base_url           TEXT,
+    request_kind       TEXT NOT NULL,
+    linked_type        TEXT NOT NULL,
+    linked_id          TEXT,
+    status             TEXT NOT NULL,
+    latency_ms         INTEGER,
+    parse_ok           INTEGER,
+    fallback_mode      TEXT,
+    fallback_used      INTEGER NOT NULL DEFAULT 0,
+    in_tokens          INTEGER,
+    out_tokens         INTEGER,
+    cache_hit_tokens   INTEGER,
+    cache_miss_tokens  INTEGER,
+    usd_estimate       REAL,
+    error_class        TEXT,
+    error_message      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_role_ts ON llm_calls(role, created_ts);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_linked ON llm_calls(linked_type, linked_id);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_status ON llm_calls(status, created_ts);
+
+CREATE TABLE IF NOT EXISTS source_health (
+    source                    TEXT PRIMARY KEY,
+    service_name              TEXT NOT NULL,
+    last_poll_ts              TEXT,
+    last_success_ts           TEXT,
+    last_event_ts             TEXT,
+    cursor                    TEXT,
+    cursor_updated_ts         TEXT,
+    events_emitted_total      INTEGER NOT NULL DEFAULT 0,
+    events_emitted_last_poll  INTEGER NOT NULL DEFAULT 0,
+    consecutive_failures      INTEGER NOT NULL DEFAULT 0,
+    last_error                TEXT,
+    last_error_ts             TEXT,
+    diagnostics               TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_source_health_last_success ON source_health(last_success_ts);
+CREATE INDEX IF NOT EXISTS idx_source_health_last_event ON source_health(last_event_ts);
+
+CREATE TABLE IF NOT EXISTS deferred_salience_retry (
+    retry_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id          TEXT,
+    source            TEXT NOT NULL,
+    raw_path          TEXT,
+    payload_hash      TEXT NOT NULL,
+    payload_json      TEXT NOT NULL,
+    reason            TEXT NOT NULL,
+    attempt_count     INTEGER NOT NULL DEFAULT 0,
+    next_attempt_ts   TEXT NOT NULL,
+    last_attempt_ts   TEXT,
+    state             TEXT NOT NULL DEFAULT 'pending',
+    last_error        TEXT,
+    created_ts        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_ts        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_deferred_salience_retry_due
+    ON deferred_salience_retry(state, next_attempt_ts);
+CREATE INDEX IF NOT EXISTS idx_deferred_salience_retry_payload
+    ON deferred_salience_retry(payload_hash, state);
+
+ALTER TABLE deliveries ADD COLUMN delivery_group_id TEXT;
+ALTER TABLE deliveries ADD COLUMN attempt_rank INTEGER;
+ALTER TABLE deliveries ADD COLUMN fallback_of INTEGER REFERENCES deliveries(delivery_id);
+ALTER TABLE deliveries ADD COLUMN is_fallback INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE deliveries ADD COLUMN failure_reason TEXT;
+CREATE INDEX IF NOT EXISTS idx_deliveries_group_rank
+    ON deliveries(delivery_group_id, attempt_rank);
+
+ALTER TABLE queue_jobs ADD COLUMN lane TEXT NOT NULL DEFAULT 'deep';
+ALTER TABLE queue_jobs ADD COLUMN heartbeat_ts TEXT;
+ALTER TABLE queue_jobs ADD COLUMN timeout_seconds INTEGER;
+CREATE INDEX IF NOT EXISTS idx_queue_jobs_lane_state
+    ON queue_jobs(lane, state, enqueued_ts);
