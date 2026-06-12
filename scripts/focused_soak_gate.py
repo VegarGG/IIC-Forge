@@ -81,12 +81,25 @@ def legacy_unit_names() -> list[str]:
 # Default runtime probes (injectable for tests)
 # ---------------------------------------------------------------------------
 
+class _SystemctlMissing(Exception):
+    """Raised when the systemctl binary is not found on the PATH."""
+
+
 def default_old_service_checker() -> list[str]:
     """Return names of old systemd units that are still active.
 
     Derives the unit list from ``legacy_unit_names()`` (globbed from
     ops/systemd/) so new legacy units are automatically included.
     An empty list means all old units are confirmed stopped.
+
+    Raises ``_SystemctlMissing`` when the ``systemctl`` binary is absent
+    (e.g. inside a container). The caller (``evaluate()``) converts this into
+    a FAILED check so the gate cannot vacuously pass in a container that
+    cannot actually probe the host services.
+
+    Only ``FileNotFoundError`` (binary missing) propagates; other subprocess
+    errors (nonzero exit, CalledProcessError) mean the unit is inactive and
+    are treated as such.
     """
     active: list[str] = []
     for name in legacy_unit_names():
@@ -96,7 +109,14 @@ def default_old_service_checker() -> list[str]:
                 stderr=subprocess.STDOUT,
                 timeout=5,
             ).decode().strip()
+        except FileNotFoundError:
+            # systemctl binary is missing — cannot probe; re-raise so evaluate()
+            # can mark the check as FAILED rather than vacuously passing.
+            raise _SystemctlMissing(
+                "systemctl binary not found; cannot probe old service state"
+            )
         except Exception:
+            # Nonzero exit (unit inactive/not-found/unknown) — not active.
             out = "inactive"
         if out == "active":
             active.append(name)
@@ -159,6 +179,7 @@ def evaluate(
     old_service_checker: Callable[[], list[str]],
     redis_checker: Callable[[], dict[str, Any]],
     mode: str = "soak",
+    skip_host_probes: bool = False,
 ) -> dict[str, Any]:
     """Evaluate production-readiness checks over the shared evidence snapshot.
 
@@ -188,6 +209,14 @@ def evaluate(
         "soak" (default) — all checks run.
         "preflight" — ``llm_calls_present`` and ``sources_fresh`` are skipped
         (fresh stack hasn't produced evidence yet).
+    skip_host_probes:
+        When True, ``old_services_stopped`` and ``redis_owned_and_configured``
+        are marked pass with an explanatory detail string rather than running
+        the default checkers.  Use this flag when the gate runs inside a
+        container that has no access to the host's systemctl or docker CLI.
+        Without this flag, a missing systemctl binary causes
+        ``old_services_stopped`` to FAIL LOUD (not vacuously pass) so the
+        gate is honest about what it could not check.
 
     Returns
     -------
@@ -201,20 +230,40 @@ def evaluate(
     # ------------------------------------------------------------------
     # 1. Old services stopped
     # ------------------------------------------------------------------
-    old_active = old_service_checker()
-    checks["old_services_stopped"] = {
-        "pass": old_active == [],
-        "detail": f"active old services: {old_active or 'none'}",
-    }
+    _skip_detail = (
+        "skipped: host probes unavailable in this execution context "
+        "(run the gate on the host for these)"
+    )
+    if skip_host_probes:
+        checks["old_services_stopped"] = {"pass": True, "detail": _skip_detail}
+    else:
+        try:
+            old_active = old_service_checker()
+            checks["old_services_stopped"] = {
+                "pass": old_active == [],
+                "detail": f"active old services: {old_active or 'none'}",
+            }
+        except _SystemctlMissing as exc:
+            checks["old_services_stopped"] = {
+                "pass": False,
+                "detail": (
+                    f"FAILED: systemctl binary not found — cannot verify old services "
+                    f"are stopped; use --skip-host-probes when running inside a container. "
+                    f"({exc})"
+                ),
+            }
 
     # ------------------------------------------------------------------
     # 2. Redis owned and configured
     # ------------------------------------------------------------------
-    redis = redis_checker()
-    checks["redis_owned_and_configured"] = {
-        "pass": bool(redis.get("ok")) and redis.get("appendonly") == "yes",
-        "detail": json.dumps(redis, sort_keys=True),
-    }
+    if skip_host_probes:
+        checks["redis_owned_and_configured"] = {"pass": True, "detail": _skip_detail}
+    else:
+        redis = redis_checker()
+        checks["redis_owned_and_configured"] = {
+            "pass": bool(redis.get("ok")) and redis.get("appendonly") == "yes",
+            "detail": json.dumps(redis, sort_keys=True),
+        }
 
     # ------------------------------------------------------------------
     # 3. Sources fresh (skipped in preflight mode)
@@ -348,6 +397,18 @@ def main() -> int:
         action="store_true",
         help="Output full JSON report (machine-readable).",
     )
+    parser.add_argument(
+        "--skip-host-probes",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip old_services_stopped and redis_owned_and_configured host probes "
+            "(mark them pass with an explanatory note). Use when running inside a "
+            "container that has no access to the host's systemctl or docker CLI. "
+            "Without this flag a missing systemctl binary causes old_services_stopped "
+            "to FAIL LOUD rather than vacuously pass."
+        ),
+    )
     args = parser.parse_args()
 
     conn = connect(DEFAULT_CONFIG["iic_db_path"])
@@ -372,6 +433,7 @@ def main() -> int:
         old_service_checker=default_old_service_checker,
         redis_checker=default_redis_checker,
         mode=args.mode,
+        skip_host_probes=args.skip_host_probes,
     )
 
     if args.json:

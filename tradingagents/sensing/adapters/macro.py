@@ -23,7 +23,7 @@ from tradingagents.sensing.source_health import record_poll_failure, record_poll
 
 log = logging.getLogger(__name__)
 NAME = "macro"
-POLL_INTERVAL = 30 * 60
+POLL_INTERVAL = 15 * 60  # 900 s — comfortably under the gate's default 1800 s staleness threshold
 
 
 class MacroAdapter:

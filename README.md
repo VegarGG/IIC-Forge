@@ -156,9 +156,8 @@ pip install -e ".[sensing,polygon,osint]"
 # 2. Configure — copy the example and fill in keys
 cp .env.example .env      # then edit .env (see Configuration below)
 
-# 3. Redis (e.g. the iic-redis container)
-docker run -d --name iic-redis -p 6379:6379 -v /srv/iic/redis:/data \
-  redis:7-alpine redis-server --appendonly yes
+# 3. Redis
+docker compose up -d redis
 
 # 4. Seed the ticker reference table (~12k US equities + crypto)
 tradingagents forge sense reseed-tickers
@@ -260,17 +259,32 @@ historical runs reproducible.
 
 ## Operations
 
-- **systemd units** (`ops/systemd/`): one per sensing adapter, plus triage,
-  promoter, worker, **action-handler**, dashboard, telegram bot, and the
-  morning (06:00) / watchlist timers. A `redis-server.service` docker alias
-  satisfies the `Requires=` dependency.
 - **Runbooks** (`ops/runbooks/`): per-phase exit-gate procedures (pre-flight,
   run, evaluate).
 - **Backups** (`ops/backup.sh`): SQLite `.backup` + Redis AOF snapshot.
 
-Bring up the sensing + orchestration + approval stack:
+### Production Runtime
+
+The canonical production runtime is Docker Compose. See
+`ops/runbooks/service-platform.md` for launch, rollback, Redis ownership,
+external local LLM, deferred retry, and focused soak procedures.
+
+### Legacy host-systemd deployment (decommissioned — do not use for new launches)
+
+> **Do not use the instructions below for new deployments.** The Compose
+> runtime (`ops/runbooks/service-platform.md`) supersedes host-systemd. The
+> focused soak gate requires the legacy units listed below to be **inactive**;
+> starting them on a Compose host will cause the `old_services_stopped` gate
+> check to fail.
+
+The legacy deployment installed one systemd unit per sensing adapter plus
+triage, promoter, worker, **action-handler**, dashboard, telegram bot, and the
+morning (06:00) / watchlist timers. A `redis-server.service` docker alias
+satisfied the `Requires=` dependency. The units are archived in `ops/systemd/`
+for historical reference.
 
 ```bash
+# DECOMMISSIONED — retained for reference only
 sudo cp ops/systemd/*.service ops/systemd/*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now redis-server.service
@@ -281,15 +295,9 @@ sudo systemctl start iic-triage iic-sense-rss iic-sense-polygon iic-sense-gdelt 
 sudo systemctl start iic-telegram-bot
 ```
 
-> The committed units target this deployment (conda interpreter, repo at
-> `/home/ziwei-huang/TradingAgents/TradingAgents`, logs to journal). Adjust
-> `User=`, `WorkingDirectory=`, and the interpreter path for another host.
-
-### Production Runtime
-
-The canonical production runtime is Docker Compose. See
-`ops/runbooks/service-platform.md` for launch, rollback, Redis ownership,
-external local LLM, deferred retry, and focused soak procedures.
+> The committed units target the original deployment (conda interpreter, repo at
+> `/home/ziwei-huang/TradingAgents/TradingAgents`, logs to journal). They are
+> not maintained for the Compose era.
 
 ## Design decisions
 

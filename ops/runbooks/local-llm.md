@@ -97,15 +97,15 @@ four `IIC_*` vars are applied at startup in
 ### Activating
 
 ```bash
-# After editing .env (no daemon-reload needed — only unit-file changes require it):
-sudo systemctl restart iic-triage iic-promoter
+# After editing .env, restart the affected Compose services:
+docker compose restart triage promoter
 
-# Verify startup probe passed (look for "startup probe OK" in each unit's log):
-journalctl -u iic-triage  -n 20 --no-pager | grep -E 'probe|resolved|fallback'
-journalctl -u iic-promoter -n 20 --no-pager | grep -E 'probe|resolved|fallback'
+# Verify startup probe passed (look for "startup probe OK" in each service's log):
+docker compose logs --tail=20 triage   | grep -E 'probe|resolved|fallback'
+docker compose logs --tail=20 promoter | grep -E 'probe|resolved|fallback'
 ```
 
-The daemons log the resolved provider/model/base_url/fallback at startup.
+The services log the resolved provider/model/base_url/fallback at startup.
 With `fallback: none` (the compiled default), a dead probe refuses to start
 — this is intentional: degrade loudly, not silently.
 
@@ -113,21 +113,27 @@ With `fallback: none` (the compiled default), a dead probe refuses to start
 
 ## 3. Fallback flip (`fallback: none` → `fallback: api`)
 
-**Important:** `fallback` is a config-file / code-default value.
-**There is no env var for it.** The `_ENV_OVERRIDES` table in
-`tradingagents/default_config.py` does not include a `fallback` entry, and
-`_apply_nested_env_overrides` does not map any env var to
-`llm_roles.<role>.fallback`.
+**Env-settable (wired in round A):** use `IIC_LLM_FALLBACK_MODE` for a
+global default across all roles, or the per-role variants
+`IIC_TRIAGE_LLM_FALLBACK_MODE` and `IIC_ALERT_GATE_LLM_FALLBACK_MODE`, and
+`IIC_LLM_FALLBACK_BUDGET` / per-role `IIC_TRIAGE_LLM_FALLBACK_BUDGET` /
+`IIC_ALERT_GATE_LLM_FALLBACK_BUDGET` for the daily call budget cap.
 
-To flip a role from `fallback: "none"` to `fallback: "api"`, you must either:
+```bash
+# In .env — flip triage and promoter to fallback=api:
+IIC_TRIAGE_LLM_FALLBACK_MODE=api
+IIC_ALERT_GATE_LLM_FALLBACK_MODE=api
+```
 
-1. **Edit `tradingagents/default_config.py`** — change the `"fallback": "none"`
-   entry in the `triage_salience` or `alert_gate` block to `"fallback": "api"`.
-   This is the committed default; a code change + redeploy is required.
-2. **Add an env-var override as future work** — a `IIC_TRIAGE_LLM_FALLBACK`
-   / `IIC_ALERT_GATE_LLM_FALLBACK` entry could be added to
-   `_apply_nested_env_overrides` following the same pattern as the existing
-   `_role_env_map` entries; that task is not yet done.
+Then restart:
+
+```bash
+docker compose restart triage promoter
+```
+
+Alternatively, to flip a role by editing the compiled default (a code change
++ redeploy), change the `"fallback": "none"` entry in
+`tradingagents/default_config.py` for the relevant role.
 
 When `fallback: "api"` is active, a dead startup probe or a consecutive
 runtime failure run that reaches `fallback_threshold` (default: 3) causes
@@ -157,8 +163,8 @@ under a running process corrupts in-flight requests and can crash the daemon.
 ### Swap procedure
 
 ```bash
-# 1. Stop IIC daemons that use the local endpoint
-sudo systemctl stop iic-triage iic-promoter
+# 1. Stop IIC Compose services that use the local endpoint
+docker compose stop triage promoter
 
 # 2. Stop llama-server
 sudo systemctl stop llama-server   # adjust unit name to your install
@@ -186,14 +192,14 @@ promoter. Do not skip. Do not hot-swap and gate in parallel.
 **L0 contract tests** (unit-level, no live endpoint required):
 
 ```bash
-/home/ziwei-huang/miniconda3/bin/python -m pytest tests/llm_clients/test_local_contract.py \
+python -m pytest tests/llm_clients/test_local_contract.py \
                  tests/llm_clients/test_json_schema_binding.py -q
 ```
 
 **L2 shadow-eval harness** (requires the new endpoint to be live):
 
 ```bash
-/home/ziwei-huang/miniconda3/bin/python scripts/shadow_eval.py \
+python scripts/shadow_eval.py \
     --limit 500 \
     --model <new-model-id> \
     --persist-set
@@ -209,10 +215,10 @@ L2 acceptance thresholds (all must pass):
 | Parse failures | = 0 |
 | Local p95 latency | ≤ API p95 latency |
 
-Once both gates pass, restart the IIC daemons:
+Once both gates pass, restart the Compose services:
 
 ```bash
-sudo systemctl start iic-triage iic-promoter
+docker compose start triage promoter
 ```
 
 ### Post-restart monitoring (soak-report counters)
@@ -262,11 +268,11 @@ they are only consumed when `provider=local` is active.
 Then reload:
 
 ```bash
-sudo systemctl restart iic-triage iic-promoter
+docker compose restart triage promoter
 
 # Confirm roles resolved to the API provider:
-journalctl -u iic-triage  -n 10 --no-pager | grep 'resolved:'
-journalctl -u iic-promoter -n 10 --no-pager | grep 'resolved:'
+docker compose logs --tail=10 triage   | grep 'resolved:'
+docker compose logs --tail=10 promoter | grep 'resolved:'
 ```
 
 ---
@@ -294,7 +300,7 @@ Relevant counter names:
 | `promoter_fallback_calls:<YYYY-MM-DD>` | Daily fallback-to-API calls for promoter (only when fallback=api) |
 
 ```bash
-sqlite3 /home/ziwei-huang/.tradingagents/iic.db \
+sqlite3 /srv/iic-forge/data/iic.db \
     "SELECT name, value FROM ops_counters WHERE name LIKE '%llm%' OR name LIKE '%fallback%' ORDER BY name"
 ```
 

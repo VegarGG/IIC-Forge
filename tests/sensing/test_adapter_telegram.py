@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from pathlib import Path
 
 from tradingagents.persistence.db import connect
+from tradingagents.persistence import store
 
 
 @pytest.fixture
@@ -77,3 +78,62 @@ def test_ensure_session_dir_idempotent(tmp_path):
     _ensure_session_dir(session_path)
     _ensure_session_dir(session_path)  # must not raise
     assert Path(session_path).parent.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Fix B3: telegram heartbeat
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_write_heartbeat_creates_health_row(conn):
+    """_write_heartbeat writes a source_health row with heartbeat=True in
+    diagnostics and emitted=0; the row is readable immediately."""
+    from tradingagents.sensing.adapters.telegram import _write_heartbeat, NAME
+
+    cursors = {"iic_signals": 42, "macro_alpha": 7}
+    _write_heartbeat(conn, cursors)
+
+    row = conn.execute(
+        "SELECT * FROM source_health WHERE source = ?", (NAME,)
+    ).fetchone()
+    assert row is not None, "source_health row must exist after _write_heartbeat"
+    diag = json.loads(row["diagnostics"])
+    assert diag.get("heartbeat") is True
+    assert sorted(diag.get("resolved_channels", [])) == sorted(cursors.keys())
+    assert int(row["events_emitted_last_poll"]) == 0
+
+
+@pytest.mark.unit
+def test_write_heartbeat_preserves_existing_last_event_ts(conn):
+    """_write_heartbeat with cursor=None / last_event_ts=None must not
+    overwrite a real last_event_ts already written by a message handler."""
+    from tradingagents.sensing.adapters.telegram import _write_heartbeat, NAME
+
+    real_ts = "2026-06-12T09:00:00+00:00"
+    # First write a real health row (simulating a message being received).
+    store.upsert_source_health_success(
+        conn,
+        source=NAME,
+        service_name="adapter-telegram",
+        last_poll_ts=real_ts,
+        last_success_ts=real_ts,
+        last_event_ts=real_ts,
+        cursor='{"iic_signals": 5}',
+        cursor_updated_ts=real_ts,
+        events_emitted_last_poll=1,
+        diagnostics={"resolved_channels": ["iic_signals"]},
+    )
+
+    # Now write a heartbeat (cursor=None, last_event_ts=None).
+    _write_heartbeat(conn, {"iic_signals": 5})
+
+    row = conn.execute(
+        "SELECT * FROM source_health WHERE source = ?", (NAME,)
+    ).fetchone()
+    # The COALESCE in the store must have preserved the real last_event_ts.
+    assert row["last_event_ts"] == real_ts, (
+        f"Heartbeat must not overwrite real last_event_ts; got {row['last_event_ts']!r}"
+    )
+    # The heartbeat diagnostics should now be present.
+    diag = json.loads(row["diagnostics"])
+    assert diag.get("heartbeat") is True

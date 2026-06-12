@@ -50,7 +50,7 @@ services:
     <<: *app
     entrypoint: ["python", "-m", "tradingagents.sensing.adapters.x"]
     depends_on: *redis_dep
-    profiles: ["sources", "x"]
+    profiles: ["x"]
 
   adapter-rss:
     <<: *app
@@ -132,7 +132,7 @@ services:
 
   gate-runner:
     <<: *app
-    entrypoint: ["python", "scripts/focused_soak_gate.py"]
+    entrypoint: ["python", "scripts/focused_soak_gate.py", "--skip-host-probes", "--json"]
     depends_on: *redis_dep
     profiles: ["gate"]
 

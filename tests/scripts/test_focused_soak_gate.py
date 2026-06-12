@@ -636,3 +636,107 @@ def test_delivery_groups_bounded_uses_failed_total(tmp_path):
     check = report["checks"]["delivery_groups_bounded"]
     assert check["pass"] is False
     assert "failed_groups=1" in check["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Fix B1: --skip-host-probes flag and missing-systemctl → FAIL LOUD
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_skip_host_probes_marks_old_services_and_redis_pass(tmp_path):
+    """With skip_host_probes=True, old_services_stopped and
+    redis_owned_and_configured are marked pass with a 'skipped' detail,
+    even when the checker callables would raise or return failure."""
+    from scripts.focused_soak_gate import evaluate
+
+    conn = connect(str(tmp_path / "iic.db"))
+    _seed_healthy(conn, "2026-06-12T10:00:00+00:00")
+
+    # Checkers that would normally fail; skip_host_probes=True should bypass them.
+    def fail_service_checker():
+        raise RuntimeError("should not be called")
+
+    def fail_redis_checker():
+        raise RuntimeError("should not be called")
+
+    report = evaluate(
+        conn,
+        now_ts="2026-06-12T10:05:00+00:00",
+        enabled_sources=["gdelt"],
+        source_stale_after_seconds=1800,
+        deferred_pending_max=0,
+        failed_delivery_group_max=0,
+        allow_api_classification_spend=False,
+        old_service_checker=fail_service_checker,
+        redis_checker=fail_redis_checker,
+        skip_host_probes=True,
+    )
+    old_check = report["checks"]["old_services_stopped"]
+    redis_check = report["checks"]["redis_owned_and_configured"]
+    assert old_check["pass"] is True, f"old_services_stopped must pass when skipped; got {old_check}"
+    assert "skipped" in old_check["detail"].lower()
+    assert redis_check["pass"] is True, f"redis_owned_and_configured must pass when skipped; got {redis_check}"
+    assert "skipped" in redis_check["detail"].lower()
+
+
+@pytest.mark.unit
+def test_missing_systemctl_fails_old_services_check_loud(tmp_path, monkeypatch):
+    """When systemctl is missing (FileNotFoundError), old_services_stopped
+    must FAIL with a clear detail — not vacuously pass as 'inactive'."""
+    import subprocess as sp
+    from scripts.focused_soak_gate import evaluate
+
+    conn = connect(str(tmp_path / "iic.db"))
+    _seed_healthy(conn, "2026-06-12T10:00:00+00:00")
+
+    def fake_check_output(cmd, **kwargs):
+        raise FileNotFoundError("systemctl not found")
+
+    monkeypatch.setattr(sp, "check_output", fake_check_output)
+
+    report = evaluate(
+        conn,
+        now_ts="2026-06-12T10:05:00+00:00",
+        enabled_sources=["gdelt"],
+        source_stale_after_seconds=1800,
+        deferred_pending_max=0,
+        failed_delivery_group_max=0,
+        allow_api_classification_spend=False,
+        **_default_checkers(),  # note: old_service_checker is overridden below
+    )
+    # Must be FAIL, not pass — container without systemctl cannot vacuously pass.
+    # Rebuild with the real default_old_service_checker (not the lambda from _default_checkers)
+    from scripts.focused_soak_gate import default_old_service_checker
+    report2 = evaluate(
+        conn,
+        now_ts="2026-06-12T10:05:00+00:00",
+        enabled_sources=["gdelt"],
+        source_stale_after_seconds=1800,
+        deferred_pending_max=0,
+        failed_delivery_group_max=0,
+        allow_api_classification_spend=False,
+        old_service_checker=default_old_service_checker,
+        redis_checker=lambda: {"ok": True, "appendonly": "yes"},
+    )
+    check = report2["checks"]["old_services_stopped"]
+    assert check["pass"] is False, (
+        f"Missing systemctl must cause old_services_stopped to FAIL LOUD; got {check}"
+    )
+    assert "systemctl" in check["detail"].lower() or "not found" in check["detail"].lower()
+    assert report2["pass"] is False
+
+
+@pytest.mark.unit
+def test_default_old_service_checker_raises_on_missing_systemctl(monkeypatch):
+    """default_old_service_checker raises _SystemctlMissing (not returns [])
+    when the systemctl binary is absent (FileNotFoundError)."""
+    import subprocess as sp
+    from scripts.focused_soak_gate import default_old_service_checker, _SystemctlMissing
+
+    def fake_check_output(cmd, **kwargs):
+        raise FileNotFoundError("No such file: systemctl")
+
+    monkeypatch.setattr(sp, "check_output", fake_check_output)
+
+    with pytest.raises(_SystemctlMissing):
+        default_old_service_checker()

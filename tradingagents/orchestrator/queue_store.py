@@ -97,6 +97,10 @@ def mark_done(
     brief_id: Optional[str],
     cost_usd: Optional[float],
 ) -> None:
+    # NOTE: Updates unconditionally (no WHERE state='running' guard). When an
+    # action-lane producer is added with shorter per-job timeouts, a swept job's
+    # later mark_done could overwrite the 'error' state set by sweep_stale_leases.
+    # Add a WHERE state='running' guard at that point.
     conn.execute(
         "UPDATE queue_jobs SET state = 'done', finished_ts = ?, "
         "run_ids = ?, brief_id = ?, cost_usd = ? WHERE job_id = ?",
@@ -111,6 +115,8 @@ def mark_error(
     job_id: int,
     error_msg: str,
 ) -> None:
+    # NOTE: Updates unconditionally (no WHERE state='running' guard). See mark_done
+    # comment — add the guard when action-lane shorter timeouts are introduced.
     conn.execute(
         "UPDATE queue_jobs SET state = 'error', finished_ts = ?, error = ? "
         "WHERE job_id = ?",

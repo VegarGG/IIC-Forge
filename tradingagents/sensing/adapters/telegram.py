@@ -28,6 +28,7 @@ from tradingagents.sensing.source_health import record_poll_success
 
 log = logging.getLogger(__name__)
 NAME = "telegram"
+HEARTBEAT_INTERVAL_SECONDS = 300
 
 
 def _ensure_session_dir(session_path: str) -> None:
@@ -76,6 +77,47 @@ async def _on_message(event, *, redis, conn, stream: str, staging_root: str) -> 
         log.exception("telegram: health write failed (non-fatal)")
 
 
+def _write_heartbeat(conn: sqlite3.Connection, cursors: dict) -> None:
+    """Write a heartbeat health row so the gate's sources_fresh check passes
+    on healthy-but-quiet channels that have not emitted a message recently.
+
+    Uses ``cursor=None`` and ``last_event_ts=None`` so the store's COALESCE
+    preserves any real cursor value and last_event_ts already in the row.
+    """
+    record_poll_success(
+        conn,
+        source=NAME,
+        service_name="adapter-telegram",
+        emitted=0,
+        cursor=None,
+        last_event_ts=None,
+        diagnostics={
+            "resolved_channels": sorted(cursors.keys()),
+            "heartbeat": True,
+        },
+    )
+
+
+async def _heartbeat_loop(
+    conn: sqlite3.Connection,
+    get_cursors,
+    interval: int = HEARTBEAT_INTERVAL_SECONDS,
+) -> None:
+    """Asyncio task: write a heartbeat row every ``interval`` seconds.
+
+    ``get_cursors`` is a zero-argument callable that returns the current
+    cursors dict (captured by the outer scope so it reflects live state).
+    Non-fatal: logs exceptions and continues.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            _write_heartbeat(conn, get_cursors())
+            log.debug("telegram heartbeat written (channels=%s)", sorted(get_cursors().keys()))
+        except Exception:
+            log.exception("telegram: heartbeat write failed (non-fatal)")
+
+
 def _main() -> None:
     logging.basicConfig(level=logging.INFO)
     from tradingagents.default_config import DEFAULT_CONFIG as C
@@ -108,12 +150,20 @@ def _main() -> None:
     _ensure_session_dir(session)
     client = TelegramClient(session, int(api_id), api_hash)
 
+    # Live cursors dict shared between the message handler and heartbeat task.
+    # Loaded once at startup from the cursor store; updated on each message.
+    cs = CursorStore(conn)
+    _cursors: dict = json.loads(cs.get(NAME) or "{}")
+
     @client.on(events.NewMessage(chats=channels))
     async def handler(event):
+        nonlocal _cursors
         try:
             await _on_message(event, redis=redis, conn=conn,
                               stream=C["sensing_ingest_stream"],
                               staging_root=staging)
+            # Keep the shared cursors dict up-to-date for the heartbeat.
+            _cursors = json.loads(CursorStore(conn).get(NAME) or "{}")
         except Exception:
             log.exception("telegram handler crashed (event dropped, will continue)")
 
@@ -127,11 +177,26 @@ def _main() -> None:
     import time as _time
 
     backoff = 1
+    _heartbeat_task_handle = None
     while True:
         try:
             client.start()  # interactive prompt only if session is brand-new
             backoff = 1      # connected OK; reset backoff
-            client.run_until_disconnected()
+
+            # Schedule the heartbeat task inside Telethon's event loop.
+            # It is cancelled before each reconnect to avoid duplicate tasks.
+            loop = client.loop
+            _heartbeat_task_handle = loop.create_task(
+                _heartbeat_loop(conn, lambda: _cursors)
+            )
+            try:
+                client.run_until_disconnected()
+            finally:
+                # Cancel heartbeat on disconnect/reconnect.
+                if _heartbeat_task_handle is not None:
+                    _heartbeat_task_handle.cancel()
+                    _heartbeat_task_handle = None
+
             # Returned cleanly == disconnected. Loop to reconnect.
             log.warning("telegram disconnected; reconnecting in %ds", backoff)
         except KeyboardInterrupt:

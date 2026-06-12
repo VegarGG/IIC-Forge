@@ -98,8 +98,12 @@ Run the preflight gate **after** old services are stopped (the
 `old_services_stopped` check will false-FAIL if legacy units are still active):
 
 ```bash
-# The host shell does not load .env; app data is bind-mounted from
-# /srv/iic-forge/data, so the DB path must be supplied explicitly.
+# Source the operator env to load template thresholds (e.g.
+# IIC_DEFERRED_RETRY_MAX_PENDING=100 set in ops/env.iic-forge.example).
+# The explicit DB path override MUST come after sourcing because the .env
+# template sets TRADINGAGENTS_IIC_DB_PATH=/data/iic.db (the container path);
+# the assignment after set +a wins and points the gate at the host bind-mount.
+set -a; . ./.env; set +a
 TRADINGAGENTS_IIC_DB_PATH=/srv/iic-forge/data/iic.db python scripts/focused_soak_gate.py --mode preflight --json
 ```
 
@@ -268,10 +272,11 @@ may show zero rows if no deep-analysis cycle has run yet.
 ## Focused Soak
 
 Run the focused soak gate after at least one full triage + alert cycle.
-The host shell does not load `.env`; the DB path must be supplied explicitly
-because app data lives in the bind-mounted `/srv/iic-forge/data` directory:
+Source the operator env first so template thresholds load; the DB path
+override after `set +a` wins over the container path in `.env`:
 
 ```bash
+set -a; . ./.env; set +a
 TRADINGAGENTS_IIC_DB_PATH=/srv/iic-forge/data/iic.db python scripts/focused_soak_gate.py --mode soak --json
 ```
 
@@ -295,6 +300,7 @@ not yet produced evidence. All other checks run in both modes.
 Preflight gate (before first triage cycle):
 
 ```bash
+set -a; . ./.env; set +a
 TRADINGAGENTS_IIC_DB_PATH=/srv/iic-forge/data/iic.db python scripts/focused_soak_gate.py --mode preflight --json
 ```
 
@@ -350,6 +356,7 @@ docker compose --profile runtime --profile sources --profile dashboard up -d --b
 5. Run preflight again to confirm the rolled-back state is clean:
 
 ```bash
+set -a; . ./.env; set +a
 TRADINGAGENTS_IIC_DB_PATH=/srv/iic-forge/data/iic.db python scripts/focused_soak_gate.py --mode preflight --json
 ```
 
