@@ -119,6 +119,13 @@ def _deliver_with_policy(conn, config, *, brief, mode, urgent=False) -> None:
     from tradingagents.delivery.policy import deliver_ordered
     from tradingagents.delivery.render import render_for_channel
 
+    policy = config.get("delivery_policy", "ordered_telegram_email")
+    if policy != "ordered_telegram_email":
+        log.warning(
+            "Unsupported delivery_policy %r; falling back to ordered_telegram_email.",
+            policy,
+        )
+
     channels = {}
     for name in ("telegram", "email"):
         ch = _build_channel(name, conn, config)

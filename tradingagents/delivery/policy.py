@@ -24,6 +24,36 @@ def deliver_ordered(
     channels: dict[str, Any],
     urgent: bool = False,
 ) -> DeliveryPolicyResult:
+    """Ordered-delivery policy: Telegram primary (rank 1), email fallback (rank 2).
+
+    Ordering contract:
+      - Telegram is always attempted first (attempt_rank=1).  If it succeeds
+        (status="sent"), the function returns immediately and email is never
+        attempted.
+      - If Telegram fails or is otherwise unavailable (status != "sent" AND
+        skip_reason != "quiet_hours"), email is attempted as a fallback
+        (attempt_rank=2, is_fallback=True, fallback_of=<telegram delivery_id>).
+
+    Quiet-hours short-circuit:
+      - When Telegram is skipped with skip_reason="quiet_hours" AND
+        urgent=False, the function returns immediately without attempting
+        email.  This is the only case where a skipped Telegram prevents
+        fallthrough to email.
+
+    urgent flag:
+      - urgent=True pierces the quiet-hours short-circuit: a quiet-hours skip
+        on Telegram will fall through to email even during quiet hours.
+      - No production caller currently sets urgent=True.  The parameter exists
+        as a hook for a future brief-urgency model (design §9.4: "unless the
+        brief is marked urgent").  Briefs cannot be marked urgent yet, so
+        urgent=False everywhere is the faithful current state.
+
+    DeliveryPolicyResult.final_status:
+      - Reflects the status of the last attempted delivery row ("sent",
+        "skipped", or "failed").  Recorded in the returned result for future
+        gate use (e.g. suppression logic or audit queries).  Current callers
+        discard it.
+    """
     group_id = uuid.uuid4().hex
     attempt_ids: list[int] = []
 

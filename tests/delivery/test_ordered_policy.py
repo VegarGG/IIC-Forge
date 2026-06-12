@@ -105,3 +105,89 @@ def test_quiet_hours_skip_does_not_email_unless_urgent(conn):
     )
     attempts = next(iter(store.fetch_delivery_groups(conn).values()))
     assert [a["channel"] for a in attempts] == ["telegram"]
+
+
+@pytest.mark.unit
+def test_disabled_telegram_falls_through_to_email_with_real_channels(tmp_path):
+    """Disabled Telegram (telegram_disabled skip) must fall through to email.
+
+    Uses real TelegramOutbound and EmailOutbound against a tmp DB, both in
+    their disabled states, to verify the policy correctly distinguishes
+    telegram_disabled from quiet_hours and does not short-circuit.
+    """
+    from tradingagents.delivery.policy import deliver_ordered
+    from tradingagents.delivery.telegram import TelegramOutbound
+    from tradingagents.delivery.email import EmailOutbound
+    from tradingagents.persistence.db import connect as iic_connect
+
+    conn = iic_connect(str(tmp_path / "iic.db"))
+    store.insert_brief(
+        conn,
+        brief_id="b2",
+        mode="event_alert_light",
+        scope='["AAPL"]',
+        generated_ts="2026-06-12T10:00:00+00:00",
+        content_path="briefs/b2.md",
+        run_ids=[],
+    )
+
+    # Telegram disabled: enabled=False and empty allowed_chat_ids.
+    # This causes TelegramOutbound.send() to record skip_reason="telegram_disabled".
+    cfg_telegram = {
+        "delivery": {
+            "quiet_hours": {"enabled": False, "start": "22:00", "end": "07:00"},
+            "digest_modes": {"telegram": "terse"},
+        },
+        "telegram_bot": {"enabled": False, "allowed_chat_ids": [], "poll_interval_seconds": 1},
+    }
+    # Email disabled: smtp.enabled=False.
+    # This causes EmailOutbound.send() to record skip_reason="smtp_disabled".
+    cfg_email = {
+        "delivery": {
+            "quiet_hours": {"enabled": False, "start": "22:00", "end": "07:00"},
+            "digest_modes": {"email": "full"},
+        },
+        "smtp": {
+            "enabled": False,
+            "host": "smtp.gmail.com",
+            "port": 587,
+            "from_addr": "x@example.com",
+            "to_addrs": ["x@example.com"],
+        },
+    }
+
+    tg_channel = TelegramOutbound(conn=conn, config=cfg_telegram)
+    email_channel = EmailOutbound(conn=conn, config=cfg_email)
+
+    result = deliver_ordered(
+        conn=conn,
+        brief={"brief_id": "b2", "mode": "event_alert_light"},
+        mode="event_alert_light",
+        bodies={"telegram": "tg body", "email": "email body"},
+        channels={"telegram": tg_channel, "email": email_channel},
+        urgent=False,
+    )
+
+    groups = store.fetch_delivery_groups(conn)
+    assert result.delivery_group_id in groups
+    attempts = groups[result.delivery_group_id]
+    # Sort by attempt_rank for deterministic assertions.
+    attempts_by_rank = sorted(attempts, key=lambda a: a["attempt_rank"])
+
+    # Rank-1 row: telegram, skipped with telegram_disabled (NOT quiet_hours).
+    rank1 = attempts_by_rank[0]
+    assert rank1["channel"] == "telegram"
+    assert rank1["attempt_rank"] == 1
+    assert rank1["status"] == "skipped"
+    assert rank1["skip_reason"] != "quiet_hours", (
+        "telegram_disabled must not look like quiet_hours to the policy"
+    )
+
+    # Rank-2 row: email fallback EXISTS, proving fallthrough happened.
+    assert len(attempts_by_rank) == 2, (
+        "email fallback row must exist — disabled telegram should not suppress it"
+    )
+    rank2 = attempts_by_rank[1]
+    assert rank2["channel"] == "email"
+    assert rank2["attempt_rank"] == 2
+    assert rank2["is_fallback"] == 1
