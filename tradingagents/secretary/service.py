@@ -8,10 +8,41 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+def record_light_summary_llm_call(
+    conn: sqlite3.Connection,
+    *,
+    brief_id: str,
+    provider: str,
+    model_id: str,
+    base_url: Optional[str],
+    latency_ms: Optional[int],
+    fallback_mode: Optional[str],
+    fallback_used: bool,
+) -> int:
+    from tradingagents.llm_clients.ledger import record_llm_success
+
+    return record_llm_success(
+        conn,
+        role="light_alert_summary",
+        service_name="promoter",
+        provider=provider,
+        model_id=model_id,
+        base_url=base_url,
+        request_kind="chat",
+        linked_type="brief",
+        linked_id=brief_id,
+        latency_ms=latency_ms,
+        parse_ok=True,
+        fallback_mode=fallback_mode,
+        fallback_used=fallback_used,
+    )
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -343,7 +374,9 @@ class Secretary:
             f"({', '.join(tickers)}). Be terse and factual.\n\n"
             f"EVENT:\n{raw_text[:4000]}"
         )
+        _t0 = time.perf_counter()
         resp = self._llm.invoke(prompt)
+        _llm_latency_ms = int((time.perf_counter() - _t0) * 1000)
         summary = getattr(resp, "content", str(resp))
 
         brief_id = uuid.uuid4().hex
@@ -364,6 +397,33 @@ class Secretary:
             parent_brief_id=None,
             trigger_event_id=event_id,
         )
+
+        # Ledger record: non-fatal — a DB write failure must not crash the
+        # alert compose path.
+        try:
+            _provider = getattr(self._llm, "_iic_provider", "unknown")
+            _model_id = (
+                getattr(self._llm, "model_name", None)
+                or getattr(self._llm, "model", "unknown")
+            )
+            _base_url = getattr(self._llm, "openai_api_base", None)
+            _fallback_mode = getattr(self._llm, "_iic_fallback_mode", None)
+            _fallback_used = bool(getattr(self._llm, "_iic_fallback_used", False))
+            record_light_summary_llm_call(
+                self._conn,
+                brief_id=brief_id,
+                provider=_provider,
+                model_id=_model_id,
+                base_url=_base_url,
+                latency_ms=_llm_latency_ms,
+                fallback_mode=_fallback_mode,
+                fallback_used=_fallback_used,
+            )
+        except Exception:
+            import logging as _logging
+            _logging.getLogger(__name__).exception(
+                "light_alert_summary ledger record failed (non-fatal)"
+            )
 
         # NOTE: insert_brief + the per-ticker actions/suppressions are written
         # via store.* helpers that each commit individually, so this is not one

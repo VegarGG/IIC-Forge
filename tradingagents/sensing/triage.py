@@ -25,6 +25,7 @@ import redis.asyncio as aioredis
 if TYPE_CHECKING:  # import-light: availability pulls in openai/httpx
     from tradingagents.llm_clients.availability import AvailabilityCounter
 
+from tradingagents.llm_clients.ledger import record_llm_error, record_llm_success
 from tradingagents.persistence.store import (
     insert_event, insert_event_ticker,
 )
@@ -223,6 +224,53 @@ class Triage:
         score: SalienceResult = await self._scorer.score(
             env=env, watchlist=self._watchlist, macro_context="",
         )
+
+        # Ledger record for triage_salience role. Non-fatal: a DB write failure
+        # must not crash the triage pipeline.
+        # linked_id is None per plan (event id not assigned until below).
+        if score.source == "llm":
+            try:
+                record_llm_success(
+                    self._conn,
+                    role="triage_salience",
+                    service_name="triage",
+                    provider=self._scorer.provider,
+                    model_id=self._scorer.model_id,
+                    base_url=self._scorer.base_url,
+                    request_kind="structured",
+                    linked_type="event",
+                    linked_id=None,
+                    latency_ms=getattr(score, "latency_ms", None),
+                    parse_ok=True,
+                    fallback_mode=self._scorer.fallback_mode,
+                    fallback_used=self._scorer.fallback_used,
+                )
+            except Exception:
+                log.exception("triage_salience ledger record failed (non-fatal)")
+        elif score.source == "deferred":
+            try:
+                record_llm_error(
+                    self._conn,
+                    role="triage_salience",
+                    service_name="triage",
+                    provider=self._scorer.provider,
+                    model_id=self._scorer.model_id,
+                    base_url=self._scorer.base_url,
+                    request_kind="structured",
+                    linked_type="event",
+                    linked_id=None,
+                    status=(
+                        "parse_error" if "parse_error" in score.reason
+                        else "transport_error"
+                    ),
+                    latency_ms=getattr(score, "latency_ms", None),
+                    parse_ok=False,
+                    fallback_mode=self._scorer.fallback_mode,
+                    fallback_used=self._scorer.fallback_used,
+                    exc=RuntimeError(score.reason),
+                )
+            except Exception:
+                log.exception("triage_salience ledger error record failed (non-fatal)")
 
         # D5 (Task 15): the scorer could not produce a score (LLM endpoint or
         # parse failure — score.reason carries which).  Degrade LOUDLY, not
@@ -652,6 +700,22 @@ def _main() -> None:
         ttl_days=C["sensing_watchlist_ttl_days"],
         availability_counter=availability_counter,
     )
+
+    # Wire provider metadata onto the scorer for ledger records (Task 5).
+    # quick_client.provider and quick_client.base_url are set by BaseLLMClient
+    # and OpenAIClient respectively.  fallback_mode/fallback_used reflect the
+    # startup resolution; the call_llm closure updates _llm_state["used_fallback"]
+    # at runtime but the scorer attributes are only used for per-call ledger
+    # evidence, so we read them at score-time via the scorer's own attributes.
+    # Guard: test doubles that monkeypatch triage_mod.Triage with a _FakeTriage
+    # that lacks _scorer must not crash _main (the existing tests that do this
+    # exercise startup probes, not scorer wiring).
+    if hasattr(t, "_scorer"):
+        t._scorer.provider = getattr(quick_client, "provider", "unknown")
+        t._scorer.model_id = quick_client.model
+        t._scorer.base_url = quick_client.base_url
+        t._scorer.fallback_mode = fallback_mode
+        t._scorer.fallback_used = used_fallback
 
     async def run() -> None:
         await ensure_consumer_group(

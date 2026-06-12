@@ -17,7 +17,7 @@ import inspect
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import redis.asyncio as aioredis
 from pydantic import BaseModel, field_validator
@@ -194,6 +194,14 @@ class SalienceScorer:
         self._redis = redis
         self._llm = llm_call
         self._ttl = cache_ttl_seconds
+        # Provider metadata for ledger records (Task 5).  Set by triage._main
+        # after building the quick_client; defaults allow unit tests to
+        # construct SalienceScorer without wiring a real LLM client.
+        self.provider: str = "unknown"
+        self.model_id: str = "unknown"
+        self.base_url: Optional[str] = None
+        self.fallback_mode: Optional[str] = None
+        self.fallback_used: bool = False
 
     async def _invoke_llm(self, prompt: str) -> str:
         # Run the sync call off the event-loop thread so blocking LLM/embed I/O

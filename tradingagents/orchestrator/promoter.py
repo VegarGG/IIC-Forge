@@ -224,7 +224,10 @@ def main(config: Optional[dict] = None) -> None:
     llm_state: dict = {"llm": None, "used_fallback": False, "model": None}
 
     if gate_enabled:
-        from tradingagents.orchestrator.alert_evaluator import evaluate_alert_candidate
+        from tradingagents.orchestrator.alert_evaluator import (
+            evaluate_alert_candidate,
+            record_alert_gate_llm_call,
+        )
         from tradingagents.secretary.service import Secretary
         # Eager startup probe (only when the role resolves to provider='local'):
         # fallback="none" → a dead endpoint REFUSES to start (raise);
@@ -236,6 +239,13 @@ def main(config: Optional[dict] = None) -> None:
         llm_state["llm"] = client.get_llm()
         llm_state["used_fallback"] = used_fallback
         llm_state["model"] = client.model
+        # Capture startup provider/base_url for ledger records.  Runtime
+        # fallback swaps llm_state["llm"] but we re-read provider/base_url
+        # from llm_state each call so a fallback swap is reflected correctly.
+        _gate_client_state = {
+            "provider": getattr(client, "provider", "unknown"),
+            "base_url": client.base_url,
+        }
         secretary = Secretary(conn=conn, data_dir=cfg["iic_data_dir"],
                               llm=llm_state["llm"])
 
@@ -277,6 +287,22 @@ def main(config: Optional[dict] = None) -> None:
             # see the units note in availability.py's module docstring.)
             if evaluation.parse_ok:
                 avail_counter.record_success()
+            # Ledger record: non-fatal — a DB write failure must not crash
+            # the evaluation path.
+            try:
+                record_alert_gate_llm_call(
+                    conn,
+                    event_id=event_id,
+                    provider=_gate_client_state["provider"],
+                    model_id=evaluation.model_id or llm_state["model"] or "unknown",
+                    base_url=_gate_client_state["base_url"],
+                    latency_ms=evaluation.latency_ms,
+                    parse_ok=evaluation.parse_ok,
+                    fallback_mode=fallback_mode,
+                    fallback_used=llm_state["used_fallback"],
+                )
+            except Exception:
+                log.exception("alert_gate ledger record failed (non-fatal)")
             return evaluation
 
     log.info("promoter starting: poll=%ss cooldown=%sm guards: bp=%s rate=%s",
@@ -324,6 +350,11 @@ def main(config: Optional[dict] = None) -> None:
                 llm_state["llm"] = fb.get_llm()
                 llm_state["model"] = fb.model
                 llm_state["used_fallback"] = True
+                # Update client state so subsequent ledger records reflect
+                # the fallback provider.
+                if gate_enabled:
+                    _gate_client_state["provider"] = getattr(fb, "provider", "unknown")
+                    _gate_client_state["base_url"] = fb.base_url
                 # The Secretary composes with its own llm handle — swap it
                 # too, or compose_event_alert_light keeps hitting the dead
                 # local endpoint while gate evals burn the API budget (the
