@@ -21,6 +21,7 @@ import requests
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.sensing.source_health import record_poll_failure, record_poll_success
 
 
 log = logging.getLogger(__name__)
@@ -70,11 +71,23 @@ class PolygonNewsAdapter:
             data = r.json()
         except Exception as e:
             log.warning("polygon poll failed (will retry): %s", e)
+            try:
+                record_poll_failure(
+                    conn,
+                    source=NAME,
+                    service_name="adapter-polygon",
+                    error=e,
+                    diagnostics={"vendor": "polygon_news"},
+                )
+            except Exception:
+                log.exception("polygon_news: health write failed (non-fatal)")
             return 0
 
         writer = EnvelopeWriter(source=NAME, redis=redis, conn=conn,
                                  stream=self._stream, staging_root=self._staging)
         emitted = 0
+        new_cursor = ""
+        last_seen = cursor
         for item in data.get("results", []):
             published = item.get("published_utc", "")
             if not published or published <= cursor:
@@ -91,6 +104,20 @@ class PolygonNewsAdapter:
             )
             await writer.write(env, raw_payload=item, cursor=published)
             emitted += 1
+            if published > new_cursor:
+                new_cursor = published
+        try:
+            record_poll_success(
+                conn,
+                source=NAME,
+                service_name="adapter-polygon",
+                emitted=emitted,
+                cursor=new_cursor or last_seen or None,
+                last_event_ts=datetime.now(timezone.utc).isoformat() if emitted else None,
+                diagnostics={"vendor": "polygon_news"},
+            )
+        except Exception:
+            log.exception("polygon_news: health write failed (non-fatal)")
         return emitted
 
     async def stream(self, *, redis: aioredis.Redis, conn: sqlite3.Connection) -> None:

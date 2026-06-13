@@ -1,0 +1,148 @@
+name: iic-forge
+
+x-app: &app
+  build:
+    context: .
+  image: iic-forge:local
+  # Layered env_file: template ships committed defaults; operator .env overrides.
+  # Long-syntax "required: false" requires Compose >=2.24 (current host qualifies).
+  env_file:
+    - ops/env.iic-forge.example
+    - path: .env
+      required: false
+  volumes:
+    - iic_data:/data
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  restart: unless-stopped
+
+x-redis-dep: &redis_dep
+  redis:
+    condition: service_healthy
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - iic_redis_data:/data
+      - ./ops/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  adapter-polygon:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.sensing.adapters.polygon_news"]
+    depends_on: *redis_dep
+    profiles: ["sources"]
+
+  adapter-telegram:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.sensing.adapters.telegram"]
+    depends_on: *redis_dep
+    profiles: ["sources"]
+
+  adapter-x:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.sensing.adapters.x"]
+    depends_on: *redis_dep
+    profiles: ["x"]
+
+  adapter-rss:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.sensing.adapters.rss"]
+    depends_on: *redis_dep
+    profiles: ["sources"]
+
+  adapter-gdelt:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.sensing.adapters.gdelt"]
+    depends_on: *redis_dep
+    profiles: ["sources"]
+
+  adapter-macro:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.sensing.adapters.macro"]
+    depends_on: *redis_dep
+    profiles: ["sources"]
+
+  triage:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.sensing.triage"]
+    depends_on: *redis_dep
+    environment:
+      - LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL:-http://host.docker.internal:8080/v1}
+    profiles: ["runtime"]
+
+  promoter:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.orchestrator.promoter"]
+    depends_on: *redis_dep
+    environment:
+      - LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL:-http://host.docker.internal:8080/v1}
+    profiles: ["runtime"]
+
+  # No producer routes lane=action at launch; provisioned for later scaling
+  # (design §6/§8); this service will idle until an action-lane producer exists.
+  worker-action:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.orchestrator.worker"]
+    depends_on: *redis_dep
+    environment:
+      - IIC_WORKER_LANE=action
+      - IIC_WORKER_CONCURRENCY=${IIC_WORKER_ACTION_CONCURRENCY:-2}
+    profiles: ["runtime"]
+
+  worker-deep:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.orchestrator.worker"]
+    depends_on: *redis_dep
+    environment:
+      - IIC_WORKER_LANE=deep
+      - IIC_WORKER_CONCURRENCY=${IIC_WORKER_DEEP_CONCURRENCY:-1}
+    profiles: ["runtime"]
+
+  action-handler:
+    <<: *app
+    entrypoint: ["python", "-m", "cli.main", "forge", "action-handler", "run"]
+    depends_on: *redis_dep
+    profiles: ["runtime"]
+
+  delivery:
+    <<: *app
+    entrypoint: ["python", "-m", "tradingagents.delivery.telegram_bot"]
+    depends_on: *redis_dep
+    profiles: ["runtime", "delivery"]
+
+  dashboard:
+    <<: *app
+    entrypoint: ["streamlit", "run", "tradingagents/dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    profiles: ["dashboard"]
+
+  gate-runner:
+    <<: *app
+    entrypoint: ["python", "scripts/focused_soak_gate.py", "--skip-host-probes", "--json"]
+    depends_on: *redis_dep
+    profiles: ["gate"]
+
+volumes:
+  iic_redis_data:
+  # bind-backed so host-run gates/backups/rollbacks see the same files containers
+  # see at /data; the directory must exist before `up` (runbook Prerequisites).
+  iic_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/iic-forge/data

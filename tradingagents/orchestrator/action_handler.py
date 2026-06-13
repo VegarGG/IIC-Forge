@@ -18,6 +18,7 @@ from typing import Any, Callable
 import json
 
 from tradingagents.persistence import store
+from tradingagents.orchestrator import queue_store
 from tradingagents.secretary.refinement import classify_and_extract
 from tradingagents.secretary.service import RefinementDepthExceeded
 
@@ -172,21 +173,21 @@ def _dispatch_one(
                 ),
             )
             return
-        with conn:
-            cur = conn.execute(
-                "INSERT INTO queue_jobs (job_type, payload, state, "
-                "enqueued_ts, trigger_event_id) VALUES (?, ?, 'queued', "
-                "datetime('now'), ?)",
-                ("event_alert",
-                 json.dumps({
-                     "event_id": event_id,
-                     "ticker": ticker,
-                     "action_id": row["action_id"],
-                     "parent_brief_id": row["brief_id"],
-                 }),
-                 event_id),
-            )
-            job_id = cur.lastrowid
+        from tradingagents.default_config import DEFAULT_CONFIG
+        _lane_timeouts = DEFAULT_CONFIG.get("worker_lane_timeouts", {})
+        job_id = queue_store.insert_queue_job(
+            conn,
+            job_type="event_alert",
+            payload=json.dumps({
+                "event_id": event_id,
+                "ticker": ticker,
+                "action_id": row["action_id"],
+                "parent_brief_id": row["brief_id"],
+            }),
+            trigger_event_id=event_id,
+            lane="deep",
+            timeout_seconds=_lane_timeouts.get("deep", 1200),
+        )
         store.mark_action_dispatched(
             conn,
             action_id=row["action_id"],

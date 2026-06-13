@@ -129,7 +129,25 @@ def test_compose_event_alert_delivers_full_brief_when_enabled(setup, monkeypatch
 
     sent = []
     fake_channel = MagicMock()
-    fake_channel.send.side_effect = lambda **kw: sent.append(kw) or 1
+
+    def _fake_send(**kw):
+        # deliver_ordered reads the delivery row back, so persist a real one.
+        sent.append(kw)
+        return store.insert_delivery(
+            conn,
+            brief_id=kw["brief"]["brief_id"],
+            channel="telegram",
+            status="sent",
+            sent_ts=_now(),
+            channel_ref="fake:1",
+            skip_reason=None,
+            delivery_group_id=kw.get("delivery_group_id"),
+            attempt_rank=kw.get("attempt_rank"),
+            fallback_of=kw.get("fallback_of"),
+            is_fallback=kw.get("is_fallback", False),
+        )
+
+    fake_channel.send.side_effect = _fake_send
     monkeypatch.setattr(
         "tradingagents.secretary.service._build_channel",
         lambda name, conn, config: fake_channel,

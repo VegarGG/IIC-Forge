@@ -19,6 +19,7 @@ import redis.asyncio as aioredis
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.sensing.source_health import record_poll_failure, record_poll_success
 
 
 log = logging.getLogger(__name__)
@@ -96,6 +97,19 @@ class RssAdapter:
                 new_last = ts
             cursors[feed_url] = max(new_last, last) if last else new_last
         self._save_cursor(conn, cursors)
+        new_cursor = json.dumps(cursors)
+        try:
+            record_poll_success(
+                conn,
+                source=NAME,
+                service_name="adapter-rss",
+                emitted=emitted,
+                cursor=new_cursor or None,
+                last_event_ts=datetime.now(timezone.utc).isoformat() if emitted else None,
+                diagnostics={"feeds": self._feeds},
+            )
+        except Exception:
+            log.exception("rss: health write failed (non-fatal)")
         return emitted
 
     async def stream(self, *, redis, conn) -> None:
@@ -104,8 +118,18 @@ class RssAdapter:
             try:
                 await self.poll_once(redis=redis, conn=conn)
                 backoff = 1
-            except Exception:
+            except Exception as e:
                 log.exception("rss stream iteration crashed")
+                try:
+                    record_poll_failure(
+                        conn,
+                        source=NAME,
+                        service_name="adapter-rss",
+                        error=e,
+                        diagnostics={},
+                    )
+                except Exception:
+                    log.exception("rss: health write failed (non-fatal)")
                 backoff = min(backoff * 2, 60)
             await asyncio.sleep(POLL_INTERVAL if backoff == 1 else backoff)
 

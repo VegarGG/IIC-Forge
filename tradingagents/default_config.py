@@ -22,6 +22,13 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_IIC_DATA_DIR":         "iic_data_dir",
     "TRADINGAGENTS_COST_GUARD_ENABLED":   "cost_guard_enabled",
     "TRADINGAGENTS_ORCHESTRATOR_ENABLED": "orchestrator_enabled",
+    # F3 sensing Redis URL — without this, all containers dial localhost
+    "TRADINGAGENTS_SENSING_REDIS_URL":    "sensing_redis_url",
+    # Focused soak gate thresholds (Task 11)
+    "IIC_SOURCE_STALE_AFTER_SECONDS":    "source_stale_after_seconds",
+    "IIC_DEFERRED_RETRY_MAX_PENDING":    "deferred_retry_max_pending",
+    "IIC_DELIVERY_FAILED_GROUP_MAX":     "delivery_failed_group_max",
+    "IIC_ALLOW_API_CLASSIFICATION_SPEND": "allow_api_classification_spend",
 }
 
 
@@ -78,6 +85,27 @@ def _apply_nested_env_overrides(config: dict) -> dict:
             tok.strip().lstrip("@") for tok in chans.split(",") if tok.strip()
         ]
 
+    # Delivery policy override (Task 8). Flat _ENV_OVERRIDES cannot reach
+    # nested keys, but delivery_policy is top-level so we handle it here
+    # alongside other non-table overrides for consistent IIC_ prefix convention.
+    policy = os.environ.get("IIC_DELIVERY_POLICY")
+    if policy:
+        config["delivery_policy"] = policy
+
+    # Worker lane + concurrency + timeout overrides (Task 9).
+    # IIC_WORKER_LANE: which queue lane this worker claims (e.g. "action", "deep").
+    # IIC_WORKER_CONCURRENCY: max concurrent jobs (int).
+    # IIC_WORKER_JOB_TIMEOUT_MIN: per-job wall-clock cap in minutes (int).
+    worker_lane = os.environ.get("IIC_WORKER_LANE")
+    if worker_lane:
+        config["worker_lane"] = worker_lane
+    worker_concurrency = os.environ.get("IIC_WORKER_CONCURRENCY")
+    if worker_concurrency:
+        config["max_concurrent_jobs"] = int(worker_concurrency)
+    worker_timeout = os.environ.get("IIC_WORKER_JOB_TIMEOUT_MIN")
+    if worker_timeout:
+        config["worker_job_timeout_min"] = int(worker_timeout)
+
     # Per-role LLM routing overrides (IIC-FORGE-05 Task 4).
     # These map into the nested llm_roles dict; the flat _ENV_OVERRIDES table
     # cannot reach nested keys, so the merge is done here.
@@ -91,6 +119,43 @@ def _apply_nested_env_overrides(config: dict) -> dict:
         val = os.environ.get(env_var)
         if val is not None and val.strip() != "":
             config.setdefault("llm_roles", {}).setdefault(role, {})[field] = val
+
+    # LLM fallback levers (IIC-FORGE-05 Fix A4).
+    # IIC_LLM_FALLBACK_MODE applies to BOTH triage_salience and alert_gate roles.
+    # Per-role overrides (OPTIONAL, 2-liner each) are also accepted when set.
+    _fallback_mode = os.environ.get("IIC_LLM_FALLBACK_MODE")
+    if _fallback_mode and _fallback_mode.strip():
+        for _role in ("triage_salience", "alert_gate"):
+            config.setdefault("llm_roles", {}).setdefault(_role, {})["fallback"] = _fallback_mode.strip()
+    # Per-role fallback mode overrides (optional; take precedence over global)
+    _triage_fb = os.environ.get("IIC_TRIAGE_LLM_FALLBACK_MODE")
+    if _triage_fb and _triage_fb.strip():
+        config.setdefault("llm_roles", {}).setdefault("triage_salience", {})["fallback"] = _triage_fb.strip()
+    _gate_fb = os.environ.get("IIC_ALERT_GATE_LLM_FALLBACK_MODE")
+    if _gate_fb and _gate_fb.strip():
+        config.setdefault("llm_roles", {}).setdefault("alert_gate", {})["fallback"] = _gate_fb.strip()
+
+    _fallback_budget = os.environ.get("IIC_LLM_FALLBACK_DAILY_BUDGET")
+    if _fallback_budget and _fallback_budget.strip():
+        _budget_val = float(_fallback_budget)
+        for _role in ("triage_salience", "alert_gate"):
+            config.setdefault("llm_roles", {}).setdefault(_role, {})["fallback_daily_budget"] = _budget_val
+
+    # SMTP env overrides (IIC-FORGE-05 Fix A3).
+    # IIC_SMTP_ENABLED: bool coercion (same pattern as _coerce for bool).
+    # IIC_SMTP_TO_ADDRS: comma-separated email addresses → list[str].
+    # IIC_SMTP_USER / IIC_SMTP_APP_PASSWORD are read directly from env at send
+    # time in tradingagents/delivery/email.py — they do NOT go through config.
+    _smtp_enabled = os.environ.get("IIC_SMTP_ENABLED")
+    if _smtp_enabled is not None and _smtp_enabled.strip() != "":
+        config.setdefault("smtp", {})["enabled"] = (
+            _smtp_enabled.strip().lower() in ("true", "1", "yes", "on")
+        )
+    _smtp_to = os.environ.get("IIC_SMTP_TO_ADDRS")
+    if _smtp_to is not None and _smtp_to.strip() != "":
+        config.setdefault("smtp", {})["to_addrs"] = [
+            addr.strip() for addr in _smtp_to.split(",") if addr.strip()
+        ]
 
     return config
 
@@ -147,6 +212,8 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     "worker_poll_interval_s": 2,
     "worker_job_timeout_min": 20,
     "max_concurrent_jobs": 1,
+    "worker_lane": "deep",
+    "worker_lane_timeouts": {"action": 300, "deep": 1200},
     # Cost guards (program-spec Appendix A: enabled=False during F0–F5)
     "trigger_backpressure_enabled": False,
     "trigger_backpressure_max_pending": 20,
@@ -267,6 +334,7 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
             "cli": "full",
         },
     },
+    "delivery_policy": "ordered_telegram_email",
     "telegram_bot": {
         "enabled": True,
         # Committed default is empty = deny-all (restricted). Populate at
@@ -290,6 +358,18 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
         "schedule_local_time": "07:00",
         "watchlist_source": "db",
     },
+    # ============================================================
+    # Focused soak gate thresholds (Task 11)
+    # ============================================================
+    # Max age (seconds) before a source is considered stale. 1800 = 30 min.
+    "source_stale_after_seconds": 1800,
+    # Max pending deferred-salience-retry rows. 0 = none expected in soak.
+    "deferred_retry_max_pending": 0,
+    # Max failed delivery groups. 0 = none expected in soak.
+    "delivery_failed_group_max": 0,
+    # When False, any API-provider classification call (triage_salience or
+    # alert_gate with provider != 'local') fails the soak gate.
+    "allow_api_classification_spend": False,
     # Per-role LLM routing. Each entry resolves role -> override -> global default
     # via create_role_llm() (Task 5). Defaults are all-None so production behavior
     # is unchanged until the env vars below are set (shadow/cutover = config-only).

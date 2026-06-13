@@ -399,11 +399,21 @@ def insert_delivery(
     sent_ts: Optional[str],
     channel_ref: Optional[str],
     skip_reason: Optional[str],
+    delivery_group_id: Optional[str] = None,
+    attempt_rank: Optional[int] = None,
+    fallback_of: Optional[int] = None,
+    is_fallback: bool = False,
+    failure_reason: Optional[str] = None,
 ) -> int:
     cur = conn.execute(
-        "INSERT INTO deliveries (brief_id, channel, status, sent_ts, channel_ref, skip_reason) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (brief_id, channel, status, sent_ts, channel_ref, skip_reason),
+        "INSERT INTO deliveries (brief_id, channel, status, sent_ts, channel_ref, "
+        "skip_reason, delivery_group_id, attempt_rank, fallback_of, is_fallback, "
+        "failure_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            brief_id, channel, status, sent_ts, channel_ref, skip_reason,
+            delivery_group_id, attempt_rank, fallback_of, 1 if is_fallback else 0,
+            (failure_reason[:1000] if failure_reason else None),
+        ),
     )
     conn.commit()
     return cur.lastrowid
@@ -726,3 +736,295 @@ def get_ops_counter(conn: sqlite3.Connection, *, name: str) -> int:
         "SELECT value FROM ops_counters WHERE name = ?", (name,)
     ).fetchone()
     return int(row["value"]) if row is not None else 0
+
+
+# --------------------------------------------------------------------
+# Service platform reconstruction control-plane helpers
+# --------------------------------------------------------------------
+
+def _bool_to_int(value: Optional[bool]) -> Optional[int]:
+    return None if value is None else (1 if value else 0)
+
+
+def insert_llm_call(
+    conn: sqlite3.Connection,
+    *,
+    created_ts: str,
+    role: str,
+    service_name: str,
+    provider: str,
+    model_id: str,
+    base_url: Optional[str],
+    request_kind: str,
+    linked_type: str,
+    linked_id: Optional[str],
+    status: str,
+    latency_ms: Optional[int],
+    parse_ok: Optional[bool],
+    fallback_mode: Optional[str],
+    fallback_used: bool,
+    in_tokens: Optional[int],
+    out_tokens: Optional[int],
+    cache_hit_tokens: Optional[int],
+    cache_miss_tokens: Optional[int],
+    usd_estimate: Optional[float],
+    error_class: Optional[str],
+    error_message: Optional[str],
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO llm_calls (created_ts, role, service_name, provider, "
+        "model_id, base_url, request_kind, linked_type, linked_id, status, "
+        "latency_ms, parse_ok, fallback_mode, fallback_used, in_tokens, "
+        "out_tokens, cache_hit_tokens, cache_miss_tokens, usd_estimate, "
+        "error_class, error_message) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            created_ts, role, service_name, provider, model_id, base_url,
+            request_kind, linked_type, linked_id, status, latency_ms,
+            _bool_to_int(parse_ok), fallback_mode, 1 if fallback_used else 0,
+            in_tokens, out_tokens, cache_hit_tokens, cache_miss_tokens,
+            usd_estimate, error_class, (error_message[:1000] if error_message else None),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def fetch_llm_calls(conn: sqlite3.Connection, *, role: Optional[str] = None) -> list[dict]:
+    if role is None:
+        rows = conn.execute("SELECT * FROM llm_calls ORDER BY call_id").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM llm_calls WHERE role = ? ORDER BY call_id",
+            (role,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_source_health_success(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    service_name: str,
+    last_poll_ts: str,
+    last_success_ts: str,
+    last_event_ts: Optional[str],
+    cursor: Optional[str],
+    cursor_updated_ts: Optional[str],
+    events_emitted_last_poll: int,
+    diagnostics: Optional[dict] = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO source_health (source, service_name, last_poll_ts, "
+        "last_success_ts, last_event_ts, cursor, cursor_updated_ts, "
+        "events_emitted_total, events_emitted_last_poll, consecutive_failures, "
+        "last_error, last_error_ts, diagnostics) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?) "
+        "ON CONFLICT(source) DO UPDATE SET "
+        "service_name = excluded.service_name, "
+        "last_poll_ts = excluded.last_poll_ts, "
+        "last_success_ts = excluded.last_success_ts, "
+        "last_event_ts = COALESCE(excluded.last_event_ts, source_health.last_event_ts), "
+        "cursor = COALESCE(excluded.cursor, source_health.cursor), "
+        "cursor_updated_ts = COALESCE(excluded.cursor_updated_ts, source_health.cursor_updated_ts), "
+        "events_emitted_total = source_health.events_emitted_total + excluded.events_emitted_last_poll, "
+        "events_emitted_last_poll = excluded.events_emitted_last_poll, "
+        "consecutive_failures = 0, "
+        "last_error = NULL, "
+        "last_error_ts = NULL, "
+        "diagnostics = excluded.diagnostics",
+        (
+            source, service_name, last_poll_ts, last_success_ts, last_event_ts,
+            cursor, cursor_updated_ts, events_emitted_last_poll,
+            events_emitted_last_poll, json.dumps(diagnostics or {}),
+        ),
+    )
+    conn.commit()
+
+
+def upsert_source_health_failure(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    service_name: str,
+    last_poll_ts: str,
+    error: str,
+    diagnostics: Optional[dict] = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO source_health (source, service_name, last_poll_ts, "
+        "events_emitted_last_poll, consecutive_failures, last_error, "
+        "last_error_ts, diagnostics) "
+        "VALUES (?, ?, ?, 0, 1, ?, ?, ?) "
+        "ON CONFLICT(source) DO UPDATE SET "
+        "service_name = excluded.service_name, "
+        "last_poll_ts = excluded.last_poll_ts, "
+        "events_emitted_last_poll = 0, "
+        "consecutive_failures = source_health.consecutive_failures + 1, "
+        "last_error = excluded.last_error, "
+        "last_error_ts = excluded.last_error_ts, "
+        "diagnostics = excluded.diagnostics",
+        (
+            source, service_name, last_poll_ts, error[:1000], last_poll_ts,
+            json.dumps(diagnostics or {}),
+        ),
+    )
+    conn.commit()
+
+
+def fetch_source_health(conn: sqlite3.Connection) -> dict[str, dict]:
+    rows = conn.execute("SELECT * FROM source_health ORDER BY source").fetchall()
+    return {r["source"]: dict(r) for r in rows}
+
+
+def find_active_deferred_salience_retry(
+    conn: sqlite3.Connection,
+    *,
+    payload_hash: str,
+) -> Optional[int]:
+    """Return the retry_id of an existing pending or running row for this
+    payload_hash, or None if no such row exists.
+
+    Uses ``idx_deferred_salience_retry_payload`` to avoid a full scan.
+    """
+    row = conn.execute(
+        "SELECT retry_id FROM deferred_salience_retry "
+        "WHERE payload_hash = ? AND state IN ('pending', 'running') "
+        "ORDER BY retry_id LIMIT 1",
+        (payload_hash,),
+    ).fetchone()
+    return int(row["retry_id"]) if row is not None else None
+
+
+def insert_deferred_salience_retry(
+    conn: sqlite3.Connection,
+    *,
+    event_id: Optional[str],
+    source: str,
+    raw_path: Optional[str],
+    payload_hash: str,
+    payload_json: str,
+    reason: str,
+    next_attempt_ts: str,
+) -> int:
+    now = _now_iso()
+    cur = conn.execute(
+        "INSERT INTO deferred_salience_retry (event_id, source, raw_path, "
+        "payload_hash, payload_json, reason, next_attempt_ts, state, "
+        "last_error, created_ts, updated_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+        (
+            event_id, source, raw_path, payload_hash, payload_json,
+            reason[:500], next_attempt_ts, reason[:1000], now, now,
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def claim_due_deferred_salience_retries(
+    conn: sqlite3.Connection,
+    *,
+    now_ts: str,
+    limit: int,
+) -> list[dict]:
+    # Atomic claim: single UPDATE ... RETURNING prevents double-claiming when
+    # multiple claimers race (requires SQLite >= 3.35.0 (RETURNING support)).
+    # Returned rows carry POST-increment attempt_count (first claim = 1).
+    rows = conn.execute(
+        "UPDATE deferred_salience_retry "
+        "SET state='running', attempt_count=attempt_count+1, "
+        "last_attempt_ts=?, updated_ts=? "
+        "WHERE retry_id IN ("
+        "    SELECT retry_id FROM deferred_salience_retry "
+        "    WHERE state='pending' AND datetime(next_attempt_ts) <= datetime(?) "
+        "    ORDER BY next_attempt_ts, retry_id LIMIT ?"
+        ") RETURNING *",
+        (now_ts, now_ts, now_ts, int(limit)),
+    ).fetchall()
+    conn.commit()
+    return [dict(r) for r in rows]
+
+
+def reclaim_stale_running_retries(
+    conn: sqlite3.Connection,
+    *,
+    older_than_ts: str,
+) -> int:
+    """Re-pend running rows whose last update is older than the cutoff (claimer died)."""
+    now = _now_iso()
+    cur = conn.execute(
+        "UPDATE deferred_salience_retry SET state='pending', updated_ts=? "
+        "WHERE state='running' AND datetime(updated_ts) <= datetime(?)",
+        (now, older_than_ts),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def reschedule_deferred_salience_retry(
+    conn: sqlite3.Connection,
+    *,
+    retry_id: int,
+    reason: str,
+    next_attempt_ts: str,
+) -> None:
+    now = _now_iso()
+    conn.execute(
+        "UPDATE deferred_salience_retry SET state = 'pending', reason = ?, "
+        "last_error = ?, next_attempt_ts = ?, updated_ts = ? WHERE retry_id = ?",
+        (reason[:500], reason[:1000], next_attempt_ts, now, retry_id),
+    )
+    conn.commit()
+
+
+def mark_deferred_salience_retry_done(conn: sqlite3.Connection, *, retry_id: int) -> None:
+    now = _now_iso()
+    conn.execute(
+        "UPDATE deferred_salience_retry SET state = 'done', updated_ts = ? WHERE retry_id = ?",
+        (now, retry_id),
+    )
+    conn.commit()
+
+
+def mark_deferred_salience_retry_dead(
+    conn: sqlite3.Connection,
+    *,
+    retry_id: int,
+    reason: str,
+) -> None:
+    now = _now_iso()
+    conn.execute(
+        "UPDATE deferred_salience_retry SET state = 'dead', last_error = ?, updated_ts = ? "
+        "WHERE retry_id = ?",
+        (reason[:1000], now, retry_id),
+    )
+    conn.commit()
+
+
+def fetch_deferred_salience_retries(
+    conn: sqlite3.Connection,
+    *,
+    state: Optional[str] = None,
+) -> list[dict]:
+    if state is None:
+        rows = conn.execute(
+            "SELECT * FROM deferred_salience_retry ORDER BY retry_id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM deferred_salience_retry WHERE state = ? ORDER BY retry_id",
+            (state,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fetch_delivery_groups(conn: sqlite3.Connection) -> dict[str, list[dict]]:
+    rows = conn.execute(
+        "SELECT * FROM deliveries WHERE delivery_group_id IS NOT NULL "
+        "ORDER BY delivery_group_id, attempt_rank, delivery_id"
+    ).fetchall()
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        out.setdefault(row["delivery_group_id"], []).append(dict(row))
+    return out

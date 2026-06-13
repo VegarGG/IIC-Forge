@@ -1,0 +1,21 @@
+[Unit]
+Description=IIC-Forge Compose runtime
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/iic-forge
+Environment=COMPOSE_PROJECT_NAME=iic-forge
+ExecStart=/usr/bin/docker compose --profile runtime --profile sources --profile dashboard up
+ExecStop=/usr/bin/docker compose down
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=0
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

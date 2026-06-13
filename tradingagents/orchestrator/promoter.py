@@ -15,6 +15,7 @@ from typing import Optional
 
 from tradingagents.persistence import store
 from tradingagents.persistence.db import connect
+from tradingagents.orchestrator import queue_store
 from tradingagents.orchestrator.candidates import fetch_candidates, fetch_candidates_grouped
 from tradingagents.orchestrator.guards import QueueBackpressure, QueueRateGuard
 
@@ -39,6 +40,7 @@ def run_once(
     approval_gate_enabled: bool = False,
     pending_ttl_hours: int = 24,
     alert_evaluator=None,
+    deep_lane_timeout_seconds: int = 1200,
 ) -> int:
     """Perform one poll cycle. With the approval gate enabled, composes one
     light alert per event (no study enqueued). Returns the count of light
@@ -124,16 +126,24 @@ def run_once(
     for ev in candidates:
         until_ts = (_now_utc() + timedelta(minutes=cooldown_min)).isoformat()
         try:
-            with conn:    # one atomic tx per event
+            with conn:    # one atomic tx per event (job + suppression)
+                # Use insert_queue_job's canonical column set (lane +
+                # timeout_seconds) inline so the INSERT and suppression upsert
+                # remain atomic; calling insert_queue_job() would commit early
+                # and break the rollback guarantee tested by
+                # test_partial_failure_does_not_leave_orphan_suppression.
                 conn.execute(
                     "INSERT INTO queue_jobs (job_type, payload, state, "
-                    "enqueued_ts, trigger_event_id) VALUES (?, ?, 'queued', ?, ?)",
+                    "enqueued_ts, trigger_event_id, lane, timeout_seconds) "
+                    "VALUES (?, ?, 'queued', ?, ?, ?, ?)",
                     (
                         "event_alert",
                         json.dumps({"event_id": ev["event_id"],
                                     "ticker": ev["ticker"]}),
                         _now_utc().isoformat(),
                         ev["event_id"],
+                        "deep",
+                        deep_lane_timeout_seconds,
                     ),
                 )
                 store.upsert_suppression(
@@ -224,7 +234,11 @@ def main(config: Optional[dict] = None) -> None:
     llm_state: dict = {"llm": None, "used_fallback": False, "model": None}
 
     if gate_enabled:
-        from tradingagents.orchestrator.alert_evaluator import evaluate_alert_candidate
+        from tradingagents.orchestrator.alert_evaluator import (
+            evaluate_alert_candidate,
+            record_alert_gate_llm_call,
+            record_alert_gate_llm_error,
+        )
         from tradingagents.secretary.service import Secretary
         # Eager startup probe (only when the role resolves to provider='local'):
         # fallback="none" → a dead endpoint REFUSES to start (raise);
@@ -236,8 +250,26 @@ def main(config: Optional[dict] = None) -> None:
         llm_state["llm"] = client.get_llm()
         llm_state["used_fallback"] = used_fallback
         llm_state["model"] = client.model
+        # Capture startup provider/base_url for ledger records.  Runtime
+        # fallback swaps llm_state["llm"] but also updates _gate_client_state
+        # so subsequent ledger records reflect the fallback provider correctly.
+        try:
+            _gate_provider = client.get_provider_name()
+        except Exception:
+            _gate_provider = getattr(client, "provider", "unknown")
+        _gate_client_state = {
+            "provider": _gate_provider,
+            "base_url": client.base_url,
+        }
+        # Stamp provider identity onto the LangChain object so that
+        # Secretary.compose_event_alert_light's getattr reads resolve to real
+        # values (provider="local" → usd_estimate=0.0 in the ledger).
+        _llm_obj = llm_state["llm"]
+        _llm_obj._iic_provider = _gate_client_state["provider"]
+        _llm_obj._iic_fallback_mode = fallback_mode
+        _llm_obj._iic_fallback_used = llm_state["used_fallback"]
         secretary = Secretary(conn=conn, data_dir=cfg["iic_data_dir"],
-                              llm=llm_state["llm"])
+                              llm=_llm_obj)
 
         def alert_evaluator(event_id, tickers):
             # Each call routed through the API fallback burns the hard daily
@@ -277,6 +309,42 @@ def main(config: Optional[dict] = None) -> None:
             # see the units note in availability.py's module docstring.)
             if evaluation.parse_ok:
                 avail_counter.record_success()
+            # Ledger record: non-fatal — a DB write failure must not crash
+            # the evaluation path.  Parse failures (transport succeeded but
+            # the model returned unparseable JSON) are recorded via the error
+            # seam so the status column reflects "parse_error" instead of
+            # "success" (Fix 3 / design spec §10 requirement).
+            _model_id_for_record = evaluation.model_id or llm_state["model"] or "unknown"
+            try:
+                if evaluation.parse_ok is False:
+                    record_alert_gate_llm_error(
+                        conn,
+                        event_id=event_id,
+                        provider=_gate_client_state["provider"],
+                        model_id=_model_id_for_record,
+                        base_url=_gate_client_state["base_url"],
+                        status="parse_error",
+                        fallback_mode=fallback_mode,
+                        fallback_used=llm_state["used_fallback"],
+                        parse_ok=False,
+                        exc=ValueError(
+                            f"alert_gate parse failure for event {event_id}"
+                        ),
+                    )
+                else:
+                    record_alert_gate_llm_call(
+                        conn,
+                        event_id=event_id,
+                        provider=_gate_client_state["provider"],
+                        model_id=_model_id_for_record,
+                        base_url=_gate_client_state["base_url"],
+                        latency_ms=evaluation.latency_ms,
+                        parse_ok=evaluation.parse_ok,
+                        fallback_mode=fallback_mode,
+                        fallback_used=llm_state["used_fallback"],
+                    )
+            except Exception:
+                log.exception("alert_gate ledger record failed (non-fatal)")
             return evaluation
 
     log.info("promoter starting: poll=%ss cooldown=%sm guards: bp=%s rate=%s",
@@ -297,6 +365,9 @@ def main(config: Optional[dict] = None) -> None:
                 approval_gate_enabled=gate_enabled,
                 pending_ttl_hours=cfg["alert_pending_ttl_hours"],
                 alert_evaluator=alert_evaluator,
+                deep_lane_timeout_seconds=cfg.get(
+                    "worker_lane_timeouts", {}
+                ).get("deep", 1200),
             )
         except KeyboardInterrupt:
             log.info("promoter shutting down on KeyboardInterrupt")
@@ -314,6 +385,23 @@ def main(config: Optional[dict] = None) -> None:
                 type(e).__name__, e, llm_state.get("model"),
                 avail_counter.consecutive, avail_counter.total,
             )
+            # Ledger evidence: record the transport error so the llm_calls
+            # table preserves outage evidence (design spec §10).  Non-fatal.
+            if gate_enabled:
+                try:
+                    record_alert_gate_llm_error(
+                        conn,
+                        event_id=None,
+                        provider=_gate_client_state["provider"],
+                        model_id=llm_state.get("model") or "unknown",
+                        base_url=_gate_client_state["base_url"],
+                        status="transport_error",
+                        fallback_mode=fallback_mode,
+                        fallback_used=llm_state["used_fallback"],
+                        exc=e,
+                    )
+                except Exception:
+                    log.exception("alert_gate transport-error ledger record failed (non-fatal)")
             if (gate_enabled and fallback_mode == "api" and primary_is_local
                     and not llm_state["used_fallback"]
                     and avail_counter.consecutive >= fallback_threshold):
@@ -324,6 +412,15 @@ def main(config: Optional[dict] = None) -> None:
                 llm_state["llm"] = fb.get_llm()
                 llm_state["model"] = fb.model
                 llm_state["used_fallback"] = True
+                # Update client state so subsequent ledger records reflect
+                # the fallback provider.
+                if gate_enabled:
+                    try:
+                        _fb_provider = fb.get_provider_name()
+                    except Exception:
+                        _fb_provider = getattr(fb, "provider", "unknown")
+                    _gate_client_state["provider"] = _fb_provider
+                    _gate_client_state["base_url"] = fb.base_url
                 # The Secretary composes with its own llm handle — swap it
                 # too, or compose_event_alert_light keeps hitting the dead
                 # local endpoint while gate evals burn the API budget (the
@@ -331,7 +428,14 @@ def main(config: Optional[dict] = None) -> None:
                 # startup-fallback path already constructs Secretary with the
                 # fallback llm; only this runtime path needs the swap.
                 if secretary is not None:
-                    secretary.set_llm(llm_state["llm"])
+                    _fb_llm = llm_state["llm"]
+                    # Stamp identity onto the new LangChain object so that
+                    # Secretary.compose_event_alert_light reads the correct
+                    # provider/fallback metadata for its ledger record.
+                    _fb_llm._iic_provider = _gate_client_state["provider"]
+                    _fb_llm._iic_fallback_mode = fallback_mode
+                    _fb_llm._iic_fallback_used = True
+                    secretary.set_llm(_fb_llm)
         except Exception:
             log.exception("promoter loop failure; sleeping 5s and continuing")
             time.sleep(5)

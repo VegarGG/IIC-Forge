@@ -18,11 +18,12 @@ import requests
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.sensing.source_health import record_poll_failure, record_poll_success
 
 
 log = logging.getLogger(__name__)
 NAME = "macro"
-POLL_INTERVAL = 30 * 60
+POLL_INTERVAL = 15 * 60  # 900 s — comfortably under the gate's default 1800 s staleness threshold
 
 
 class MacroAdapter:
@@ -32,20 +33,21 @@ class MacroAdapter:
         self._staging = staging_root
         self._stream = stream
 
-    async def _poll_fred(self, redis, conn, writer) -> int:
+    async def _poll_fred(self, redis, conn, writer) -> tuple[int, str | None]:
+        """Return (emitted, new_cursor). Re-raises request exceptions so poll_once
+        can classify them as failures."""
         key = os.environ.get("FRED_API_KEY")
         if not key:
-            return 0
-        try:
-            r = requests.get(
-                "https://api.stlouisfed.org/fred/releases",
-                params={"api_key": key, "file_type": "json", "limit": 100,
-                        "order_by": "release_id", "sort_order": "desc"},
-                timeout=20,
-            )
-            r.raise_for_status(); data = r.json()
-        except Exception as e:
-            log.warning("FRED poll failed: %s", e); return 0
+            return 0, None
+        # Let request exceptions propagate — poll_once records the failure.
+        r = requests.get(
+            "https://api.stlouisfed.org/fred/releases",
+            params={"api_key": key, "file_type": "json", "limit": 100,
+                    "order_by": "release_id", "sort_order": "desc"},
+            timeout=20,
+        )
+        r.raise_for_status()
+        data = r.json()
         cs = CursorStore(conn)
         last_id = int(cs.get(NAME) or "0")
         emitted = 0
@@ -71,24 +73,63 @@ class MacroAdapter:
         # value left behind is the SMALLEST emitted rid — the cursor would crawl
         # forward by only one release per poll and re-emit the rest every cycle.
         # Persist the true max ONCE here so the next poll only sees new releases.
+        new_cursor: str | None = None
         if emitted:
             cs.set(NAME, str(new_max))
-        return emitted
+            new_cursor = str(new_max)
+        return emitted, new_cursor
 
     async def poll_once(self, *, redis: aioredis.Redis, conn: sqlite3.Connection) -> int:
         writer = EnvelopeWriter(source=NAME, redis=redis, conn=conn,
                                  stream=self._stream, staging_root=self._staging)
-        n = await self._poll_fred(redis, conn, writer)
         # TE is intentionally a no-op until TRADINGECONOMICS_KEY ships.
-        return n
+        try:
+            emitted, new_cursor = await self._poll_fred(redis, conn, writer)
+        except Exception as e:
+            log.warning("FRED poll failed: %s", e)
+            try:
+                record_poll_failure(
+                    conn,
+                    source=NAME,
+                    service_name="adapter-macro",
+                    error=e,
+                    diagnostics={"provider": "fred"},
+                )
+            except Exception:
+                log.exception("macro: health write failed (non-fatal)")
+            return 0
+        try:
+            record_poll_success(
+                conn,
+                source=NAME,
+                service_name="adapter-macro",
+                emitted=emitted,
+                cursor=new_cursor,
+                last_event_ts=datetime.now(timezone.utc).isoformat() if emitted else None,
+                diagnostics={"provider": "fred"},
+            )
+        except Exception:
+            log.exception("macro: health write failed (non-fatal)")
+        return emitted
 
     async def stream(self, *, redis, conn) -> None:
         backoff = 1
         while True:
             try:
                 await self.poll_once(redis=redis, conn=conn); backoff = 1
-            except Exception:
-                log.exception("macro iteration crashed"); backoff = min(backoff * 2, 60)
+            except Exception as e:
+                log.exception("macro iteration crashed")
+                try:
+                    record_poll_failure(
+                        conn,
+                        source=NAME,
+                        service_name="adapter-macro",
+                        error=e,
+                        diagnostics={},
+                    )
+                except Exception:
+                    log.exception("macro: health write failed (non-fatal)")
+                backoff = min(backoff * 2, 60)
             await asyncio.sleep(POLL_INTERVAL if backoff == 1 else backoff)
 
 

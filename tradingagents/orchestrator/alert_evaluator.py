@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
@@ -15,6 +16,71 @@ from tradingagents.llm_clients.capabilities import get_capabilities, is_default_
 from tradingagents.llm_clients.postprocess import strip_think_blocks
 
 log = logging.getLogger(__name__)
+
+
+def record_alert_gate_llm_call(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    provider: str,
+    model_id: str,
+    base_url: Optional[str],
+    latency_ms: Optional[int],
+    parse_ok: Optional[bool],
+    fallback_mode: Optional[str],
+    fallback_used: bool,
+) -> int:
+    from tradingagents.llm_clients.ledger import record_llm_success
+
+    return record_llm_success(
+        conn,
+        role="alert_gate",
+        service_name="promoter",
+        provider=provider,
+        model_id=model_id,
+        base_url=base_url,
+        request_kind="structured",
+        linked_type="event",
+        linked_id=event_id,
+        latency_ms=latency_ms,
+        parse_ok=parse_ok,
+        fallback_mode=fallback_mode,
+        fallback_used=fallback_used,
+    )
+
+
+def record_alert_gate_llm_error(
+    conn: sqlite3.Connection,
+    *,
+    event_id: Optional[str],
+    provider: str,
+    model_id: str,
+    base_url: Optional[str],
+    status: str,
+    fallback_mode: Optional[str],
+    fallback_used: bool,
+    parse_ok: Optional[bool] = None,
+    exc: BaseException,
+) -> int:
+    from tradingagents.llm_clients.ledger import record_llm_error
+
+    return record_llm_error(
+        conn,
+        role="alert_gate",
+        service_name="promoter",
+        provider=provider,
+        model_id=model_id,
+        base_url=base_url,
+        request_kind="structured",
+        linked_type="event",
+        linked_id=event_id,
+        status=status,
+        latency_ms=None,
+        parse_ok=parse_ok,
+        fallback_mode=fallback_mode,
+        fallback_used=fallback_used,
+        exc=exc,
+    )
 
 
 class AlertEvaluationPayload(BaseModel):

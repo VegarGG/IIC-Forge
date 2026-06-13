@@ -13,3 +13,4 @@ results
 eval_results
 Dockerfile
 docker-compose.yml
+compose.yml

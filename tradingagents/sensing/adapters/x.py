@@ -29,6 +29,7 @@ except ModuleNotFoundError:
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.sensing.source_health import record_poll_failure, record_poll_success
 
 
 log = logging.getLogger(__name__)
@@ -47,7 +48,18 @@ class XAdapter:
     async def poll_once(self, *, redis: aioredis.Redis, conn: sqlite3.Connection) -> int:
         token = os.environ.get("X_BEARER_TOKEN")
         if not token:
-            log.warning("X_BEARER_TOKEN not set; skipping x poll"); return 0
+            log.warning("X_BEARER_TOKEN not set; skipping x poll")
+            try:
+                record_poll_failure(
+                    conn,
+                    source=NAME,
+                    service_name="adapter-x",
+                    error="X_BEARER_TOKEN not set",
+                    diagnostics={},
+                )
+            except Exception:
+                log.exception("x: health write failed (non-fatal)")
+            return 0
         cs = CursorStore(conn)
         since_id = cs.get(NAME)
         try:
@@ -59,9 +71,32 @@ class XAdapter:
                 max_results=100,
             )
         except Exception as e:
-            log.warning("x poll failed: %s", e); return 0
+            log.warning("x poll failed: %s", e)
+            try:
+                record_poll_failure(
+                    conn,
+                    source=NAME,
+                    service_name="adapter-x",
+                    error=e,
+                    diagnostics={"query": self._query},
+                )
+            except Exception:
+                log.exception("x: health write failed (non-fatal)")
+            return 0
         tweets = response.data or []
         if not tweets:
+            try:
+                record_poll_success(
+                    conn,
+                    source=NAME,
+                    service_name="adapter-x",
+                    emitted=0,
+                    cursor=None,
+                    last_event_ts=None,
+                    diagnostics={"query": self._query},
+                )
+            except Exception:
+                log.exception("x: health write failed (non-fatal)")
             return 0
         writer = EnvelopeWriter(source=NAME, redis=redis, conn=conn,
                                  stream=self._stream, staging_root=self._staging)
@@ -81,6 +116,19 @@ class XAdapter:
                                cursor=str(tw.id))
             new_max = max(new_max, int(tw.id))
             emitted += 1
+        newest_id = str(new_max) if new_max else None
+        try:
+            record_poll_success(
+                conn,
+                source=NAME,
+                service_name="adapter-x",
+                emitted=emitted,
+                cursor=newest_id or None,
+                last_event_ts=datetime.now(timezone.utc).isoformat() if emitted else None,
+                diagnostics={"query": self._query},
+            )
+        except Exception:
+            log.exception("x: health write failed (non-fatal)")
         return emitted
 
     async def stream(self, *, redis, conn) -> None:

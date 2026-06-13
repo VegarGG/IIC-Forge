@@ -25,8 +25,12 @@ import redis.asyncio as aioredis
 if TYPE_CHECKING:  # import-light: availability pulls in openai/httpx
     from tradingagents.llm_clients.availability import AvailabilityCounter
 
+from tradingagents.llm_clients.ledger import record_llm_error, record_llm_success
 from tradingagents.persistence.store import (
     insert_event, insert_event_ticker,
+)
+from tradingagents.sensing.deferred_retry import (
+    reclaim_stale_running, run_due_retries_once, schedule_deferred_retry,
 )
 from tradingagents.sensing.dedupe import DedupeStage1, DedupeStage2
 from tradingagents.sensing.envelope import Envelope
@@ -187,7 +191,7 @@ class Triage:
         self._watchlist = list(tickers)
 
     # ------------------------------------------------------------------
-    async def process_one(self, env: Envelope) -> TriageResult:
+    async def process_one(self, env: Envelope, *, from_retry: bool = False) -> TriageResult:
         """Run the full pipeline on one envelope. Always writes a row."""
         # Stage 1: hash / external_id dedupe.
         hit1 = await self._ds1.check(env)
@@ -224,6 +228,53 @@ class Triage:
             env=env, watchlist=self._watchlist, macro_context="",
         )
 
+        # Ledger record for triage_salience role. Non-fatal: a DB write failure
+        # must not crash the triage pipeline.
+        # linked_id is None per plan (event id not assigned until below).
+        if score.source == "llm":
+            try:
+                record_llm_success(
+                    self._conn,
+                    role="triage_salience",
+                    service_name="triage",
+                    provider=self._scorer.provider,
+                    model_id=self._scorer.model_id,
+                    base_url=self._scorer.base_url,
+                    request_kind="structured",
+                    linked_type="event",
+                    linked_id=None,
+                    latency_ms=getattr(score, "latency_ms", None),
+                    parse_ok=True,
+                    fallback_mode=self._scorer.fallback_mode,
+                    fallback_used=self._scorer.fallback_used,
+                )
+            except Exception:
+                log.exception("triage_salience ledger record failed (non-fatal)")
+        elif score.source == "deferred":
+            try:
+                record_llm_error(
+                    self._conn,
+                    role="triage_salience",
+                    service_name="triage",
+                    provider=self._scorer.provider,
+                    model_id=self._scorer.model_id,
+                    base_url=self._scorer.base_url,
+                    request_kind="structured",
+                    linked_type="event",
+                    linked_id=None,
+                    status=(
+                        "parse_error" if "parse_error" in score.reason
+                        else "transport_error"
+                    ),
+                    latency_ms=getattr(score, "latency_ms", None),
+                    parse_ok=False,
+                    fallback_mode=self._scorer.fallback_mode,
+                    fallback_used=self._scorer.fallback_used,
+                    exc=RuntimeError(score.reason),
+                )
+            except Exception:
+                log.exception("triage_salience ledger error record failed (non-fatal)")
+
         # D5 (Task 15): the scorer could not produce a score (LLM endpoint or
         # parse failure — score.reason carries which).  Degrade LOUDLY, not
         # silently:
@@ -244,6 +295,18 @@ class Triage:
         if score.source == "deferred":
             if self._availability_counter is not None:
                 self._availability_counter.record_failure(reason=score.reason)
+            # Guard 1 (from_retry): when re-running a claimed retry, the
+            # original deferred event row and retry row already exist — the
+            # runner owns rescheduling of the original row.  Skip both the
+            # insert_event and schedule_deferred_retry calls to prevent
+            # exponential row growth on repeated defers.
+            if from_retry:
+                log.warning(
+                    "salience still deferred (%s) during retry; runner will "
+                    "reschedule the existing retry row", score.reason,
+                )
+                return TriageResult(event_id="", status="triaged",
+                                    salience=None)
             ev_id = self._new_event_id()
             insert_event(
                 self._conn, event_id=ev_id, source=env.source,
@@ -256,6 +319,19 @@ class Triage:
                 status="triaged", deduped_of=None,
                 salience_source="deferred",
             )
+            try:
+                schedule_deferred_retry(
+                    self._conn,
+                    env=env,
+                    event_id=ev_id,
+                    reason=score.reason,
+                    now_ts=datetime.now(timezone.utc).isoformat(),
+                    base_delay_seconds=60,
+                )
+            except Exception:
+                log.exception(
+                    "schedule_deferred_retry failed for event %s (non-fatal)", ev_id
+                )
             log.warning(
                 "salience deferred (%s): event %s recorded un-scored; dedupe "
                 "recording skipped so a redelivery re-scores", score.reason,
@@ -486,8 +562,38 @@ async def _consume_forever(self, *, group: str, consumer: str, stream: str,
                             block_ms: int, batch: int,
                             min_idle_ms: int = 60000,
                             dead_stream: Optional[str] = None,
-                            max_deliveries: int = 5) -> None:
+                            max_deliveries: int = 5,
+                            process_retries: bool = False) -> None:
     while True:
+        # Deferred-salience retry processing is intentionally single-claimer:
+        # only the consumer with process_retries=True (consumer index 0 in
+        # _main) runs reclaim_stale_running + run_due_retries_once.  All other
+        # consumers skip this block entirely.  This prevents N consumers from
+        # redundantly contending on retry-table writes every tick and, more
+        # critically, eliminates a race where consumer B's reclaim re-pends a
+        # row that consumer A is actively processing (slow LLM batch >
+        # RECLAIM_RUNNING_AFTER_SECONDS = 1800 s) — which would cause
+        # double-scoring of the same event.
+        #
+        # RECLAIM_RUNNING_AFTER_SECONDS (1800 s) must stay above the
+        # worst-case wall time of a full retry batch so that a legitimately
+        # in-progress batch is never reclaimed mid-flight.
+        if process_retries:
+            try:
+                now_ts = datetime.now(timezone.utc).isoformat()
+                reclaim_stale_running(self._conn, now_ts)
+                await run_due_retries_once(
+                    self._conn,
+                    triage=self,
+                    now_ts=now_ts,
+                    limit=25,
+                    max_attempts=5,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("deferred retry processing failed (non-fatal)")
+
         try:
             await self.consume_once(group=group, consumer=consumer,
                                      stream=stream, block_ms=block_ms,
@@ -604,6 +710,11 @@ def _main() -> None:
     # Mutable holder so runtime fallback engagement can swap the model for
     # subsequent calls without rebuilding the closure.
     _llm_state = {"llm": llm, "used_fallback": used_fallback}
+    # Late-binding slot for _sync_scorer_identity (defined after t is built).
+    # call_llm is defined before t exists; the fallback branch fires only
+    # during the consume loop (after t and _sync_scorer_identity are both
+    # initialised), so reading _sync_scorer_holder[0] at that point is safe.
+    _sync_scorer_holder: list = [None]
 
     def call_llm(prompt: str) -> str:
         # Runtime fallback (D5): after fallback_threshold CONSECUTIVE failures
@@ -619,6 +730,12 @@ def _main() -> None:
             _llm_state["llm"] = maybe_bind_salience_schema(
                 fb.get_llm(), fb.model)
             _llm_state["used_fallback"] = True
+            # Update scorer identity to reflect the fallback client so that
+            # post-fallback triage_salience ledger rows report the API
+            # provider rather than the original local provider.
+            _sync_fn = _sync_scorer_holder[0]
+            if _sync_fn is not None:
+                _sync_fn(fb, fallback_used=True)
         if _llm_state["used_fallback"] and not fallback_budget.try_consume():
             raise LocalEndpointUnavailable(
                 f"fallback daily budget exhausted for role triage_salience "
@@ -653,6 +770,36 @@ def _main() -> None:
         availability_counter=availability_counter,
     )
 
+    # Wire provider metadata onto the scorer for ledger records (Task 5).
+    # quick_client.provider and quick_client.base_url are set by BaseLLMClient
+    # and OpenAIClient respectively.  fallback_mode/fallback_used reflect the
+    # startup resolution; the call_llm closure updates _llm_state["used_fallback"]
+    # at runtime but the scorer attributes are only used for per-call ledger
+    # evidence, so we read them at score-time via the scorer's own attributes.
+    # Guard: test doubles that monkeypatch triage_mod.Triage with a _FakeTriage
+    # that lacks _scorer must not crash _main (the existing tests that do this
+    # exercise startup probes, not scorer wiring).
+    # Helper: push the current client identity onto the scorer.  Called once
+    # at startup with fallback_used=used_fallback, and again from the fallback
+    # branch of call_llm (above) with fallback_used=True — via _sync_scorer_holder
+    # so the closure can reference the function even though it is defined after t.
+    def _sync_scorer_identity(client, *, fallback_used: bool = False) -> None:
+        if not hasattr(t, "_scorer"):
+            return
+        try:
+            prov = client.get_provider_name()
+        except Exception:
+            prov = getattr(client, "provider", "unknown")
+        t._scorer.provider = prov
+        t._scorer.model_id = client.model
+        t._scorer.base_url = getattr(client, "base_url", None)
+        t._scorer.fallback_mode = fallback_mode
+        t._scorer.fallback_used = fallback_used
+
+    # Populate the late-binding slot so the call_llm fallback branch can invoke it.
+    _sync_scorer_holder[0] = _sync_scorer_identity
+    _sync_scorer_identity(quick_client, fallback_used=used_fallback)
+
     async def run() -> None:
         await ensure_consumer_group(
             redis, stream=C["sensing_ingest_stream"], group=C["sensing_consumer_group"],
@@ -682,6 +829,8 @@ def _main() -> None:
                 await asyncio.sleep(60)
 
         # N consumers + refresher + reaper.
+        # Consumer 0 is the designated retry processor (process_retries=True);
+        # all others skip retry processing to avoid contention and double-scoring.
         tasks = [refresher(), reaper()]
         for i in range(C["sensing_triage_consumers"]):
             tasks.append(t.consume_forever(
@@ -694,6 +843,7 @@ def _main() -> None:
                 min_idle_ms=60000,
                 dead_stream=C["sensing_dead_stream"],
                 max_deliveries=C["sensing_triage_max_failures"],
+                process_retries=(i == 0),
             ))
         await asyncio.gather(*tasks)
 

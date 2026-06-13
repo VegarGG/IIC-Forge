@@ -1,5 +1,7 @@
 # F5 Exit-Gate Runbook — 72-Hour Soak
 
+> Historical F5 exit gate on the pre-Compose deployment; superseded by `ops/runbooks/service-platform.md`.
+
 Single contiguous 72-hour run against live F3 OSINT. Operator interacts
 during the window to drive checks G4 / G5 / G6.
 

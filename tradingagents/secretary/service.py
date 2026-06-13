@@ -7,7 +7,9 @@ Morning digest is stubbed — lands in F5.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -22,6 +24,38 @@ from tradingagents.secretary.analysis_runner import (
 )
 from tradingagents.secretary.morning import run_one_ticker
 from tradingagents.secretary.synthesis import synthesize_brief
+
+log = logging.getLogger(__name__)
+
+
+def record_light_summary_llm_call(
+    conn: sqlite3.Connection,
+    *,
+    brief_id: str,
+    provider: str,
+    model_id: str,
+    base_url: Optional[str],
+    latency_ms: Optional[int],
+    fallback_mode: Optional[str],
+    fallback_used: bool,
+) -> int:
+    from tradingagents.llm_clients.ledger import record_llm_success
+
+    return record_llm_success(
+        conn,
+        role="light_alert_summary",
+        service_name="promoter",
+        provider=provider,
+        model_id=model_id,
+        base_url=base_url,
+        request_kind="chat",
+        linked_type="brief",
+        linked_id=brief_id,
+        latency_ms=latency_ms,
+        parse_ok=True,
+        fallback_mode=fallback_mode,
+        fallback_used=fallback_used,
+    )
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _env = Environment(
@@ -72,6 +106,43 @@ def _build_channel(name, conn, config):
         from tradingagents.delivery.telegram import TelegramOutbound
         return TelegramOutbound(conn=conn, config=config)
     return None
+
+
+def _deliver_with_policy(conn, config, *, brief, mode, urgent=False) -> None:
+    """Ordered Telegram-primary/email-fallback delivery helper.
+
+    Builds only telegram and email channels (policy channels); renders bodies
+    per channel; calls deliver_ordered. The cli channel is excluded from the
+    policy since it is not part of the Telegram/email ordered chain.
+    Never raises — delivery failures are recorded as deliveries rows.
+    """
+    from tradingagents.delivery.policy import deliver_ordered
+    from tradingagents.delivery.render import render_for_channel
+
+    policy = config.get("delivery_policy", "ordered_telegram_email")
+    if policy != "ordered_telegram_email":
+        log.warning(
+            "Unsupported delivery_policy %r; falling back to ordered_telegram_email.",
+            policy,
+        )
+
+    channels = {}
+    for name in ("telegram", "email"):
+        ch = _build_channel(name, conn, config)
+        if ch is not None:
+            channels[name] = ch
+    bodies = {
+        name: render_for_channel(channel=name, mode=mode, brief=brief)
+        for name in channels
+    }
+    deliver_ordered(
+        conn=conn,
+        brief=brief,
+        mode=mode,
+        bodies=bodies,
+        channels=channels,
+        urgent=urgent,
+    )
 
 
 class RefinementDepthExceeded(Exception):
@@ -343,7 +414,9 @@ class Secretary:
             f"({', '.join(tickers)}). Be terse and factual.\n\n"
             f"EVENT:\n{raw_text[:4000]}"
         )
+        _t0 = time.perf_counter()
         resp = self._llm.invoke(prompt)
+        _llm_latency_ms = int((time.perf_counter() - _t0) * 1000)
         summary = getattr(resp, "content", str(resp))
 
         brief_id = uuid.uuid4().hex
@@ -364,6 +437,30 @@ class Secretary:
             parent_brief_id=None,
             trigger_event_id=event_id,
         )
+
+        # Ledger record: non-fatal — a DB write failure must not crash the
+        # alert compose path.
+        try:
+            _provider = getattr(self._llm, "_iic_provider", "unknown")
+            _model_id = (
+                getattr(self._llm, "model_name", None)
+                or getattr(self._llm, "model", "unknown")
+            )
+            _base_url = getattr(self._llm, "openai_api_base", None)
+            _fallback_mode = getattr(self._llm, "_iic_fallback_mode", None)
+            _fallback_used = bool(getattr(self._llm, "_iic_fallback_used", False))
+            record_light_summary_llm_call(
+                self._conn,
+                brief_id=brief_id,
+                provider=_provider,
+                model_id=_model_id,
+                base_url=_base_url,
+                latency_ms=_llm_latency_ms,
+                fallback_mode=_fallback_mode,
+                fallback_used=_fallback_used,
+            )
+        except Exception:
+            log.exception("light_alert_summary ledger record failed (non-fatal)")
 
         # NOTE: insert_brief + the per-ticker actions/suppressions are written
         # via store.* helpers that each commit individually, so this is not one
@@ -396,37 +493,15 @@ class Secretary:
         return brief_id
 
     def _deliver_light_alert(self, brief_id, tickers, summary, ev) -> None:
-        """Best-effort fan-out to enabled channels. Delivery failures are
-        recorded as deliveries rows by each channel; never raise here."""
+        """Ordered Telegram-primary/email-fallback delivery for light alerts."""
         from tradingagents.default_config import DEFAULT_CONFIG
-        from tradingagents.delivery.render import render_for_channel
         config = dict(DEFAULT_CONFIG)
         brief = {
             "brief_id": brief_id, "mode": "event_alert_light",
             "summary": summary, "tickers": list(tickers),
             "event_headline": (ev["source"] or "event"),
         }
-        names = list(config["delivery"]["enabled_channels"])
-        if config["telegram_bot"]["enabled"] and "telegram" not in names:
-            names.append("telegram")
-        for name in names:
-            try:
-                ch = _build_channel(name, self._conn, config)
-                if ch is None:
-                    continue
-                body = render_for_channel(
-                    channel=name, mode="event_alert_light", brief=brief)
-                ch.send(brief=brief, mode="event_alert_light", body=body)
-            except Exception as exc:  # noqa: BLE001
-                store.insert_delivery(
-                    self._conn,
-                    brief_id=brief_id,
-                    channel=name,
-                    status="failed",
-                    sent_ts=None,
-                    channel_ref=str(exc)[:500],
-                    skip_reason=None,
-                )
+        _deliver_with_policy(self._conn, config, brief=brief, mode="event_alert_light")
 
     def _deliver_deep_dive(
         self,
@@ -436,9 +511,8 @@ class Secretary:
         generated_ts: str,
         synthesis: Dict[str, str],
     ) -> None:
-        """Best-effort fan-out for manually requested deep-dive briefs."""
+        """Ordered Telegram-primary/email-fallback delivery for deep-dive briefs."""
         from tradingagents.default_config import DEFAULT_CONFIG
-        from tradingagents.delivery.render import render_for_channel
         config = dict(DEFAULT_CONFIG)
         brief = {
             "brief_id": brief_id,
@@ -454,27 +528,7 @@ class Secretary:
                 }
             ],
         }
-        names = list(config["delivery"]["enabled_channels"])
-        if config["telegram_bot"]["enabled"] and "telegram" not in names:
-            names.append("telegram")
-        for name in names:
-            try:
-                ch = _build_channel(name, self._conn, config)
-                if ch is None:
-                    continue
-                body = render_for_channel(
-                    channel=name, mode="deep_dive", brief=brief)
-                ch.send(brief=brief, mode="deep_dive", body=body)
-            except Exception as exc:  # noqa: BLE001
-                store.insert_delivery(
-                    self._conn,
-                    brief_id=brief_id,
-                    channel=name,
-                    status="failed",
-                    sent_ts=None,
-                    channel_ref=str(exc)[:500],
-                    skip_reason=None,
-                )
+        _deliver_with_policy(self._conn, config, brief=brief, mode="deep_dive")
 
     def _deliver_event_alert(
         self,
@@ -485,9 +539,8 @@ class Secretary:
         raw_text: str,
         synthesis: Dict[str, str],
     ) -> None:
-        """Best-effort fan-out for approved full event-alert briefs."""
+        """Ordered Telegram-primary/email-fallback delivery for event-alert briefs."""
         from tradingagents.default_config import DEFAULT_CONFIG
-        from tradingagents.delivery.render import render_for_channel
         config = dict(DEFAULT_CONFIG)
         brief = {
             "brief_id": brief_id,
@@ -504,27 +557,7 @@ class Secretary:
                 }
             ],
         }
-        names = list(config["delivery"]["enabled_channels"])
-        if config["telegram_bot"]["enabled"] and "telegram" not in names:
-            names.append("telegram")
-        for name in names:
-            try:
-                ch = _build_channel(name, self._conn, config)
-                if ch is None:
-                    continue
-                body = render_for_channel(
-                    channel=name, mode="event_alert", brief=brief)
-                ch.send(brief=brief, mode="event_alert", body=body)
-            except Exception as exc:  # noqa: BLE001
-                store.insert_delivery(
-                    self._conn,
-                    brief_id=brief_id,
-                    channel=name,
-                    status="failed",
-                    sent_ts=None,
-                    channel_ref=str(exc)[:500],
-                    skip_reason=None,
-                )
+        _deliver_with_policy(self._conn, config, brief=brief, mode="event_alert")
 
     # ----- F5: morning digest -----
     def compose_morning_digest(

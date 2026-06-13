@@ -54,8 +54,29 @@ def test_compose_light_delivers_to_channels_when_enabled(tmp_path, monkeypatch):
     sec = Secretary(conn=conn, data_dir=str(tmp_path / "data"), llm=llm)
 
     sent = []
+
+    def _fake_send(**kw):
+        sent.append(kw["mode"])
+        # Under ordered policy, deliver_ordered reads the delivery row back from
+        # the DB after each send — the fake must write a real row.
+        brief = kw["brief"]
+        return store.insert_delivery(
+            conn,
+            brief_id=brief["brief_id"],
+            channel="fake",
+            status="sent",
+            sent_ts="2026-06-12T10:00:00+00:00",
+            channel_ref="fake:1",
+            skip_reason=None,
+            delivery_group_id=kw.get("delivery_group_id"),
+            attempt_rank=kw.get("attempt_rank"),
+            fallback_of=kw.get("fallback_of"),
+            is_fallback=kw.get("is_fallback", False),
+        )
+
     fake_channel = MagicMock()
-    fake_channel.send.side_effect = lambda **kw: sent.append(kw["mode"]) or 1
+    fake_channel.channel_name = "fake"
+    fake_channel.send.side_effect = _fake_send
     monkeypatch.setattr(svc, "_build_channel",
                         lambda name, conn, config: fake_channel)
 

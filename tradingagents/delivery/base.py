@@ -54,7 +54,17 @@ class DeliveryChannel(ABC):
     def _send_impl(self, brief: Dict[str, Any], mode: str, body: str) -> tuple:
         """Return (channel_ref, error_msg). Raise on failure."""
 
-    def send(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
+    def send(
+        self,
+        *,
+        brief: Dict[str, Any],
+        mode: str,
+        body: str,
+        delivery_group_id: Optional[str] = None,
+        attempt_rank: Optional[int] = None,
+        fallback_of: Optional[int] = None,
+        is_fallback: bool = False,
+    ) -> int:
         if mode in _QUIET_HOUR_MODES and is_quiet_hours(
             local_time=_local_now(),
             config=self._config["delivery"]["quiet_hours"],
@@ -67,6 +77,11 @@ class DeliveryChannel(ABC):
                 sent_ts=None,
                 channel_ref=None,
                 skip_reason="quiet_hours",
+                delivery_group_id=delivery_group_id,
+                attempt_rank=attempt_rank,
+                fallback_of=fallback_of,
+                is_fallback=is_fallback,
+                failure_reason="quiet_hours",
             )
 
         try:
@@ -79,6 +94,11 @@ class DeliveryChannel(ABC):
                 sent_ts=_utc_now_iso(),
                 channel_ref=channel_ref,
                 skip_reason=None,
+                delivery_group_id=delivery_group_id,
+                attempt_rank=attempt_rank,
+                fallback_of=fallback_of,
+                is_fallback=is_fallback,
+                failure_reason=None,
             )
             # S-8: on event_alert delivery, create EXACTLY ONE pending
             # brief_action (matching the [Run Backtest]/[Dismiss] keyboard) so
@@ -97,6 +117,11 @@ class DeliveryChannel(ABC):
                 sent_ts=None,
                 channel_ref=str(exc)[:500],
                 skip_reason=None,
+                delivery_group_id=delivery_group_id,
+                attempt_rank=attempt_rank,
+                fallback_of=fallback_of,
+                is_fallback=is_fallback,
+                failure_reason=str(exc)[:1000],
             )
 
     def _ensure_pending_action(self, brief_id: str) -> None:
