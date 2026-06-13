@@ -145,11 +145,20 @@ def insert_event(
     raw_path: Optional[str],
     status: str,
     deduped_of: Optional[str],
+    salience_source: Optional[str] = None,
 ) -> None:
+    """Insert one events row.
+
+    ``salience_source`` (Task 15): 'llm' | 'cache' | 'deferred' | None.
+    'deferred' marks an un-scored event (salience must be NULL) written when
+    the salience LLM call failed — identifiable/retryable, never promotable.
+    """
     conn.execute(
         "INSERT INTO events (event_id, source, ingested_ts, salience, "
-        "raw_path, deduped_of, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (event_id, source, ingested_ts, salience, raw_path, deduped_of, status),
+        "raw_path, deduped_of, status, salience_source) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (event_id, source, ingested_ts, salience, raw_path, deduped_of,
+         status, salience_source),
     )
     conn.commit()
 
@@ -285,11 +294,15 @@ def insert_alert_evaluation(
     score: float,
     payload: dict,
     created_ts: str,
+    model_id: Optional[str] = None,
+    parse_ok: Optional[bool] = None,
+    latency_ms: Optional[int] = None,
 ) -> int:
     cur = conn.execute(
         "INSERT INTO alert_evaluations "
-        "(event_id, tickers, decision, score, payload, created_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(event_id, tickers, decision, score, payload, created_ts, "
+        "model_id, parse_ok, latency_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             event_id,
             json.dumps(tickers),
@@ -297,10 +310,40 @@ def insert_alert_evaluation(
             score,
             json.dumps(payload),
             created_ts,
+            model_id,
+            # SQLite stores booleans as integers; None stays NULL
+            (1 if parse_ok else 0) if parse_ok is not None else None,
+            latency_ms,
         ),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def fetch_alert_eval_telemetry(
+    conn: sqlite3.Connection,
+    *,
+    model_id: Optional[str] = None,
+) -> list[dict]:
+    """Return alert_evaluations rows with telemetry columns for funnel analysis.
+
+    Columns returned: evaluation_id, event_id, decision, score, model_id,
+    parse_ok, latency_ms, created_ts.
+
+    Optionally filter by model_id.  Rows are ordered by evaluation_id
+    (insertion order) — stable for per-model parse-failure rate and latency
+    distribution queries (Task 14/16 consumers).
+    """
+    where = "WHERE model_id = ? " if model_id is not None else ""
+    params: tuple = (model_id,) if model_id is not None else ()
+    rows = conn.execute(
+        "SELECT evaluation_id, event_id, decision, score, "
+        "model_id, parse_ok, latency_ms, created_ts "
+        f"FROM alert_evaluations {where}"
+        "ORDER BY evaluation_id",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # --------------------------------------------------------------------
@@ -554,3 +597,132 @@ def update_brief_analysis_pack(
         (analysis_pack_id, brief_id),
     )
     conn.commit()
+
+
+# --------------------------------------------------------------------
+# Task 13: shadow_eval — per-call rows from the replay harness
+# --------------------------------------------------------------------
+
+def insert_shadow_eval(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    model_id: str,
+    parse_ok: bool,
+    created_ts: str,
+    api_salience: Optional[float] = None,
+    local_salience: Optional[float] = None,
+    salience_delta: Optional[float] = None,
+    api_verdict: Optional[str] = None,
+    local_verdict: Optional[str] = None,
+    latency_ms: Optional[int] = None,
+) -> int:
+    """Insert one shadow-replay row and return its shadow_id.
+
+    A row may cover the triage role only (salience columns set, verdict columns
+    NULL), the alert-gate role only (verdict columns set, salience columns NULL),
+    or both roles simultaneously.  ``parse_ok`` records whether the LOCAL model
+    response was parseable; ``latency_ms`` is the LOCAL call's wall-clock time.
+    """
+    cur = conn.execute(
+        "INSERT INTO shadow_eval "
+        "(event_id, model_id, api_salience, local_salience, salience_delta, "
+        "api_verdict, local_verdict, parse_ok, latency_ms, created_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            event_id,
+            model_id,
+            api_salience,
+            local_salience,
+            salience_delta,
+            api_verdict,
+            local_verdict,
+            1 if parse_ok else 0,
+            latency_ms,
+            created_ts,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def fetch_shadow_eval(
+    conn: sqlite3.Connection,
+    *,
+    model_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    newest: bool = False,
+) -> list[dict]:
+    """Return shadow_eval rows for the Task-14 reporter.
+
+    Columns returned: shadow_id, event_id, model_id, api_salience,
+    local_salience, salience_delta, api_verdict, local_verdict, parse_ok,
+    latency_ms, created_ts.
+
+    Optionally filter by ``model_id``.  Optionally cap results with ``limit``.
+
+    When ``newest=False`` (default): rows ordered by shadow_id ASC, LIMIT
+    takes the *oldest* N rows — stable insertion-order slice.
+
+    When ``newest=True``: LIMIT takes the *newest* N rows (ORDER BY
+    shadow_id DESC internally) then re-sorts them ascending by shadow_id
+    before returning, so callers always receive a time-ordered slice.  Use
+    this for ``--report-only --limit N`` to ensure the reporter sees the most
+    recent run rather than a stale prefix.
+    """
+    where = "WHERE model_id = ? " if model_id is not None else ""
+    params = (model_id,) if model_id is not None else ()
+
+    if newest and limit is not None:
+        # Fetch the newest N rows (DESC), then re-sort ascending for the caller.
+        inner_sql = (
+            "SELECT shadow_id, event_id, model_id, "
+            "api_salience, local_salience, salience_delta, "
+            "api_verdict, local_verdict, parse_ok, latency_ms, created_ts "
+            f"FROM shadow_eval {where}ORDER BY shadow_id DESC LIMIT {int(limit)}"
+        )
+        sql = f"SELECT * FROM ({inner_sql}) ORDER BY shadow_id ASC"
+    else:
+        limit_clause = f"LIMIT {int(limit)}" if limit is not None else ""
+        sql = (
+            "SELECT shadow_id, event_id, model_id, "
+            "api_salience, local_salience, salience_delta, "
+            "api_verdict, local_verdict, parse_ok, latency_ms, created_ts "
+            f"FROM shadow_eval {where}ORDER BY shadow_id ASC {limit_clause}"
+        )
+
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --------------------------------------------------------------------
+# Task 15 helpers — ops_counters (availability failure counters / budgets)
+# --------------------------------------------------------------------
+# Persistent named counters consumed by the D5 availability layer
+# (tradingagents/llm_clients/availability.py) and read by the L3 soak gate
+# ("failure counter = 0" must be queryable across daemon restarts) and the
+# Task 17 endpoint-down self-alert.  Counter names in use are documented on
+# the ops_counters table in schema.sql.
+
+def bump_ops_counter(
+    conn: sqlite3.Connection, *, name: str, delta: int = 1
+) -> int:
+    """Atomically add ``delta`` to counter ``name`` (creating it at ``delta``)
+    and return the new value."""
+    conn.execute(
+        "INSERT INTO ops_counters (name, value, updated_ts) VALUES (?, ?, ?) "
+        "ON CONFLICT(name) DO UPDATE SET "
+        "value = value + excluded.value, "
+        "updated_ts = excluded.updated_ts",
+        (name, delta, _now_iso()),
+    )
+    conn.commit()
+    return get_ops_counter(conn, name=name)
+
+
+def get_ops_counter(conn: sqlite3.Connection, *, name: str) -> int:
+    """Current value of counter ``name``; 0 when the counter does not exist."""
+    row = conn.execute(
+        "SELECT value FROM ops_counters WHERE name = ?", (name,)
+    ).fetchone()
+    return int(row["value"]) if row is not None else 0

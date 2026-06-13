@@ -12,13 +12,18 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Sequence
 
 import redis.asyncio as aioredis
+
+if TYPE_CHECKING:  # import-light: availability pulls in openai/httpx
+    from tradingagents.llm_clients.availability import AvailabilityCounter
 
 from tradingagents.persistence.store import (
     insert_event, insert_event_ticker,
@@ -40,6 +45,52 @@ class TriageResult:
     salience: Optional[float] = None
     deduped_of: Optional[str] = None
     matched_tickers: Sequence[str] = ()
+
+
+def _open_cross_thread_conn(db_path: str) -> sqlite3.Connection:
+    """Open a second, ``check_same_thread=False`` connection to ``db_path``.
+
+    For sqlite objects that are created on one thread (the asyncio event-loop
+    thread) but used from another (an executor / ``asyncio.to_thread`` worker).
+    Callers MUST serialize access themselves — either a single worker thread
+    owns the connection (DedupeStage2's max_workers=1 executor) or every
+    holder of the connection wraps each use in ONE SHARED lock
+    (AvailabilityCounter + DailyFallbackBudget in ``_main``; per-holder locks
+    do NOT serialize cross-holder access and corrupt the C-level sqlite3
+    state).  The standard connect() helper is intentionally not used here to
+    avoid changing its global signature; no schema is applied (connect()
+    already ran).
+    """
+    if not db_path:
+        raise ValueError(
+            "Triage requires a file-backed sqlite DB; "
+            ":memory:/temp DBs cannot be shared across connections"
+        )
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def _open_ds2_conn(db_path: str) -> sqlite3.Connection:
+    """Open a sqlite connection for DedupeStage2's dedicated executor thread.
+
+    check_same_thread=False is required because the connection is created on
+    the Triage constructor thread (the asyncio event-loop thread) but then used
+    exclusively inside a single-thread ThreadPoolExecutor worker.  We document
+    this explicitly: the executor has max_workers=1, so only one thread ever
+    touches this connection at a time — the usual sqlite thread-safety concern
+    (concurrent writes from multiple threads) cannot arise.  We load sqlite_vec
+    ourselves so KNN queries work.
+    """
+    import sqlite_vec as _sqlite_vec
+    ds2_conn = _open_cross_thread_conn(db_path)
+    ds2_conn.enable_load_extension(True)
+    _sqlite_vec.load(ds2_conn)
+    ds2_conn.enable_load_extension(False)
+    return ds2_conn
 
 
 class Triage:
@@ -64,21 +115,43 @@ class Triage:
         confidence_threshold: float = 0.8,
         salience_cache_ttl_seconds: int = 86400,
         ttl_days: int = 7,
+        availability_counter: "Optional[AvailabilityCounter]" = None,
     ) -> None:
         self._conn = conn
         self._redis = redis
         self._data_dir = data_dir
         self._ds1 = DedupeStage1(conn=conn, redis=redis,
                                   fingerprint_ttl_hours=fingerprint_ttl_hours)
-        self._ds2 = DedupeStage2(conn=conn, embedder=embedder,
+
+        # DedupeStage2 calls embedder.embed() — a CPU-bound sentence-transformer
+        # encode that takes 10-100+ ms and must not block the event loop.  We
+        # dispatch all ds2 calls through a single-thread executor so that:
+        #   (a) embed() runs off the event-loop thread, and
+        #   (b) sqlite access is serialized (one thread owns the connection).
+        # A dedicated connection opened with check_same_thread=False is needed
+        # because the connection is created here (on the event-loop thread) but
+        # used inside the executor worker thread.  max_workers=1 means only one
+        # thread ever touches _ds2_conn, satisfying sqlite's thread-safety
+        # requirement without requiring a lock.
+        db_path = conn.execute(
+            "PRAGMA database_list"
+        ).fetchone()[2]  # (seq, name, file) → file is index 2
+        self._ds2_conn = _open_ds2_conn(db_path)
+        self._ds2_executor = ThreadPoolExecutor(max_workers=1,
+                                                thread_name_prefix="triage-ds2")
+        self._ds2 = DedupeStage2(conn=self._ds2_conn, embedder=embedder,
                                   cosine_threshold=cosine_threshold,
                                   window_hours=window_hours)
+
         self._scorer = SalienceScorer(redis=redis, llm_call=llm_call,
                                        cache_ttl_seconds=salience_cache_ttl_seconds)
         self._validator = TickerValidator(conn=conn)
         self._salience_threshold = salience_threshold
         self._confidence_threshold = confidence_threshold
         self._ttl_days = ttl_days
+        # D5 (Task 15): failure counter bumped whenever the scorer defers.
+        # Optional so unit tests / callers without availability wiring work.
+        self._availability_counter = availability_counter
         # In-process cached active watchlist; refreshed by the loop every N s.
         self._watchlist: list[str] = []
 
@@ -86,12 +159,25 @@ class Triage:
     def _new_event_id(self) -> str:
         return uuid.uuid4().hex
 
-    def _canonical_raw_path(self, event_id: str, src_staging_path: str) -> str:
+    def _canonical_raw_path(self, event_id: str, src_staging_path: str,
+                            *, consume: bool = True) -> str:
+        """Canonicalize the staging raw file to ``events/<event_id>.json``.
+
+        ``consume=False`` COPIES instead of moving, leaving the staging file
+        in place.  The deferred path uses this: deferred events deliberately
+        skip dedupe recording so a redelivery is RE-SCORED — that redelivered
+        envelope still points at the staging path, which must therefore still
+        exist or the re-scored event ends up with raw_path="" (no raw text
+        for downstream compose).
+        """
         canonical_dir = Path(self._data_dir) / "events"
         canonical_dir.mkdir(parents=True, exist_ok=True)
         dst = canonical_dir / f"{event_id}.json"
         try:
-            shutil.move(src_staging_path, dst)
+            if consume:
+                shutil.move(src_staging_path, dst)
+            else:
+                shutil.copy2(src_staging_path, dst)
         except FileNotFoundError:
             # Staging file gone (test envelopes may not write one); leave path absent.
             return ""
@@ -116,8 +202,12 @@ class Triage:
             return TriageResult(event_id=ev_id, status="duplicate",
                                 deduped_of=hit1)
 
-        # Stage 2: embedding cosine.
-        hit2 = self._ds2.check(env.text)
+        # Stage 2: embedding cosine.  Dispatched to the single-thread executor
+        # so that embedder.embed() (CPU-bound encode) runs off the event loop.
+        loop = asyncio.get_running_loop()
+        hit2 = await loop.run_in_executor(
+            self._ds2_executor, self._ds2.check, env.text
+        )
         if hit2:
             ev_id = self._new_event_id()
             insert_event(
@@ -134,6 +224,52 @@ class Triage:
             env=env, watchlist=self._watchlist, macro_context="",
         )
 
+        # D5 (Task 15): the scorer could not produce a score (LLM endpoint or
+        # parse failure — score.reason carries which).  Degrade LOUDLY, not
+        # silently:
+        #   - count the failure (in-memory consecutive run + persistent total);
+        #   - persist the event so the backlog is observable, but with
+        #     salience=NULL (un-scored — `salience >= ?` in the promoter
+        #     candidate query excludes NULL, so it can never fire an alert)
+        #     and salience_source='deferred' so it is identifiable/retryable;
+        #   - deliberately SKIP stage-1/stage-2 dedupe RECORDING and ticker
+        #     promotion: a redelivery of the same payload must be RE-SCORED,
+        #     not swallowed as a duplicate of the unscored row.
+        #
+        # Operator note: this return is a HANDLED outcome — _process_entry
+        # XACKs the stream entry like any other, so re-scoring relies on the
+        # SOURCE re-publishing the payload (poll-based adapters do on their
+        # next sweep).  The deferred backlog is discoverable via
+        # `SELECT ... WHERE salience_source='deferred'`.
+        if score.source == "deferred":
+            if self._availability_counter is not None:
+                self._availability_counter.record_failure(reason=score.reason)
+            ev_id = self._new_event_id()
+            insert_event(
+                self._conn, event_id=ev_id, source=env.source,
+                ingested_ts=env.ingested_ts, salience=None,
+                # consume=False: COPY the staging raw file rather than move
+                # it — the redelivery that re-scores this payload reads the
+                # same staging path and must still find its raw text.
+                raw_path=self._canonical_raw_path(ev_id, env.raw_path,
+                                                  consume=False),
+                status="triaged", deduped_of=None,
+                salience_source="deferred",
+            )
+            log.warning(
+                "salience deferred (%s): event %s recorded un-scored; dedupe "
+                "recording skipped so a redelivery re-scores", score.reason,
+                ev_id,
+            )
+            return TriageResult(event_id=ev_id, status="triaged",
+                                salience=None)
+        # Only a REAL LLM round-trip proves the endpoint is healthy.  Cache
+        # hits contact nothing, so they must leave the consecutive-failure
+        # run untouched — otherwise frequent cache hits during an outage
+        # would delay fallback engagement indefinitely.
+        if score.source == "llm" and self._availability_counter is not None:
+            self._availability_counter.record_success()
+
         # Resolve tickers: union(source_tags.tickers, mentioned_tickers) → validate.
         candidate = list(env.source_tags.get("tickers", [])) + \
                     [m.ticker for m in score.mentioned_tickers]
@@ -146,10 +282,16 @@ class Triage:
             ingested_ts=env.ingested_ts, salience=score.salience,
             raw_path=self._canonical_raw_path(ev_id, env.raw_path),
             status="triaged", deduped_of=None,
+            salience_source=score.source,   # 'llm' | 'cache'
         )
         # Record fingerprints + embedding (only on non-duplicates).
         await self._ds1.record(env, event_id=ev_id)
-        self._ds2.record(text=env.text, event_id=ev_id)
+        # ds2.record embeds the text (CPU-bound) — also off-thread via the
+        # same single-thread executor so sqlite access stays serialized.
+        await loop.run_in_executor(
+            self._ds2_executor,
+            lambda: self._ds2.record(text=env.text, event_id=ev_id),
+        )
 
         # Per-ticker rows + watchlist gate.
         conf_by_ticker = {m.ticker: m.confidence for m in score.mentioned_tickers}
@@ -380,16 +522,110 @@ def _main() -> None:
     redis = make_redis(C["sensing_redis_url"])
     conn = connect(C["iic_db_path"])
 
-    # Build the LLM caller from the existing factory.
-    from tradingagents.llm_clients.factory import create_llm_client
-    quick_client = create_llm_client(
-        provider=C["llm_provider"], model=C["quick_think_llm"],
-        base_url=C.get("backend_url"),
+    # Build the LLM caller from the existing factory, applying the D5
+    # availability policy (Task 15): when the role resolves to
+    # provider='local', an eager /health + 1-token completion probe runs HERE
+    # so a dead endpoint fails FAST and LOUD at startup (mirroring the eager
+    # embedder load below).  fallback="none" → refuse to start;
+    # fallback="api" → re-resolve to the global API provider (logged,
+    # budget-bounded per call).
+    from tradingagents.llm_clients.availability import (
+        TRIAGE_FAILURE_COUNTER, TRIAGE_FALLBACK_BUDGET,
+        AvailabilityCounter, DailyFallbackBudget, LocalEndpointUnavailable,
+        resolve_role_llm_global, resolve_role_llm_with_fallback,
     )
+    from tradingagents.sensing.salience import maybe_bind_salience_schema
+    quick_client, used_fallback = resolve_role_llm_with_fallback(
+        "triage_salience", C)
     llm = quick_client.get_llm()
+    # Capability-gated: bind json_schema response_format only when the resolved
+    # model supports grammar-constrained decoding (local GGUF / llama.cpp).
+    # DeepSeek/MiniMax API models have supports_json_schema=False and are left
+    # unbound so they never receive an unsupported parameter.
+    llm = maybe_bind_salience_schema(llm, quick_client.model)
+
+    role_cfg = C.get("llm_roles", {}).get("triage_salience", {}) or {}
+    fallback_mode = (role_cfg.get("fallback") or "none").lower()
+    fallback_threshold = int(role_cfg.get("fallback_threshold", 3))
+    primary_is_local = (
+        (role_cfg.get("provider") or C.get("llm_provider") or "").lower()
+        == "local"
+    )
+    # Failure counter: bumped by process_one on every deferred score; read
+    # here to drive runtime fallback engagement, persisted via ops_counters
+    # for the soak gate (Task 16) and the self-alert seam (Task 17).
+    #
+    # DEDICATED cross-thread connection: call_llm runs inside
+    # asyncio.to_thread (SalienceScorer dispatches the sync LLM call to a
+    # worker thread), so fallback_budget.try_consume persists ops_counters
+    # OFF the main thread.  The main `conn` is main-thread-bound
+    # (check_same_thread=True) — using it there raises
+    # sqlite3.ProgrammingError, which the budget's except sqlite3.Error
+    # swallows, silently degrading persistence to in-memory.
+    #
+    # ONE conn, ONE lock: the counter (record_failure, event-loop thread) and
+    # the budget (try_consume, to_thread workers) share this conn, so they
+    # must also share the lock that serializes every access to it.  Each
+    # object's default per-instance lock would leave cross-object conn calls
+    # unserialized — under interleaving the C-level sqlite3 module raises
+    # SystemError('error return without exception set') (NOT a sqlite3.Error,
+    # so it escapes the persistence except-nets into process_one) and loses
+    # persisted bumps.
+    # Task 17 self-alert: when the consecutive deferred run reaches the
+    # role's fallback_threshold (the documented alert-threshold source — no
+    # new config key), the counter fires the operator self-alert EXACTLY
+    # ONCE per outage (debounced in the counter, re-armed by
+    # record_success).  Lock discipline: record_failure releases the SHARED
+    # avail_lock BEFORE invoking the callback, so the transport send never
+    # holds the lock the to_thread budget workers need.
+    # The callback runs on whichever thread recorded the crossing failure —
+    # here that is process_one on the event-loop thread.  The send is
+    # NON-BLOCKING: when called from a running event-loop thread, a daemon
+    # thread is spawned so the loop is never stalled (see self_alert.py).
+    from tradingagents.ops import self_alert
+    _alert_provider = (role_cfg.get("provider") or C.get("llm_provider") or "").lower()
+    _alert_base_url = getattr(quick_client, "base_url", None) or ""
+    _alert_context = (
+        f"role=triage_salience provider={_alert_provider} "
+        f"model={quick_client.model} endpoint={_alert_base_url}"
+    )
+    alerter = self_alert.build_self_alerter(C, context=_alert_context)
+    avail_conn = _open_cross_thread_conn(C["iic_db_path"])
+    avail_lock = threading.Lock()
+    availability_counter = AvailabilityCounter(
+        name=TRIAGE_FAILURE_COUNTER, conn=avail_conn, lock=avail_lock,
+        alert_threshold=fallback_threshold,
+        on_threshold=alerter.endpoint_down_callback)
+    fallback_budget = DailyFallbackBudget(
+        name=TRIAGE_FALLBACK_BUDGET,
+        max_per_day=int(role_cfg.get("fallback_daily_budget", 500)),
+        conn=avail_conn, lock=avail_lock,
+    )
+    # Mutable holder so runtime fallback engagement can swap the model for
+    # subsequent calls without rebuilding the closure.
+    _llm_state = {"llm": llm, "used_fallback": used_fallback}
+
     def call_llm(prompt: str) -> str:
+        # Runtime fallback (D5): after fallback_threshold CONSECUTIVE failures
+        # (counted by process_one when the scorer defers), re-resolve this
+        # role to the global API provider.  Engagement is sticky for the
+        # process lifetime; every fallback call burns the hard daily budget,
+        # and when it is exhausted the raise below makes the scorer defer —
+        # degradation stays loud and counted, never silent.
+        if (fallback_mode == "api" and primary_is_local
+                and not _llm_state["used_fallback"]
+                and availability_counter.consecutive >= fallback_threshold):
+            fb = resolve_role_llm_global("triage_salience", C)
+            _llm_state["llm"] = maybe_bind_salience_schema(
+                fb.get_llm(), fb.model)
+            _llm_state["used_fallback"] = True
+        if _llm_state["used_fallback"] and not fallback_budget.try_consume():
+            raise LocalEndpointUnavailable(
+                f"fallback daily budget exhausted for role triage_salience "
+                f"(max={fallback_budget.max_per_day}/day)"
+            )
         # LangChain chat models expose .invoke for str-or-message input.
-        out = llm.invoke(prompt)
+        out = _llm_state["llm"].invoke(prompt)
         return getattr(out, "content", str(out))
 
     # Eagerly load the embedder model so a missing dep / failed download
@@ -414,6 +650,7 @@ def _main() -> None:
         confidence_threshold=C["sensing_watchlist_confidence_threshold"],
         salience_cache_ttl_seconds=C["sensing_salience_cache_ttl_seconds"],
         ttl_days=C["sensing_watchlist_ttl_days"],
+        availability_counter=availability_counter,
     )
 
     async def run() -> None:

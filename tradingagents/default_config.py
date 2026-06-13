@@ -57,6 +57,15 @@ def _apply_nested_env_overrides(config: dict) -> dict:
       sensing telegram adapter listens to (.env) → telegram_channels as
       list[str]. A leading '@' is stripped from each. Empty/unset → leave the
       committed default ([] = listen to nothing) untouched.
+    - IIC_TRIAGE_LLM_PROVIDER / IIC_TRIAGE_LLM_MODEL: per-role LLM routing
+      override for the triage_salience role. Cutover = pure env flip.
+    - IIC_ALERT_GATE_LLM_PROVIDER / IIC_ALERT_GATE_LLM_MODEL: per-role LLM
+      routing override for the alert_gate role.
+    NOTE: LOCAL_LLM_BASE_URL is consumed directly at request time in
+    openai_client._resolve_provider_base_url (Task 1). default_config does not
+    mirror it because the file's idiom only mirrors config-driven values, not
+    URL resolution that happens per-request. base_url in each llm_roles entry
+    defaults to None; a future task can populate it via env if needed.
     """
     raw = os.environ.get("TELEGRAM_BOT_ALLOWED_CHAT_IDS")
     if raw is not None and raw.strip() != "":
@@ -68,6 +77,21 @@ def _apply_nested_env_overrides(config: dict) -> dict:
         config["telegram_channels"] = [
             tok.strip().lstrip("@") for tok in chans.split(",") if tok.strip()
         ]
+
+    # Per-role LLM routing overrides (IIC-FORGE-05 Task 4).
+    # These map into the nested llm_roles dict; the flat _ENV_OVERRIDES table
+    # cannot reach nested keys, so the merge is done here.
+    _role_env_map = [
+        ("IIC_TRIAGE_LLM_PROVIDER",    "triage_salience", "provider"),
+        ("IIC_TRIAGE_LLM_MODEL",       "triage_salience", "model"),
+        ("IIC_ALERT_GATE_LLM_PROVIDER", "alert_gate",     "provider"),
+        ("IIC_ALERT_GATE_LLM_MODEL",    "alert_gate",     "model"),
+    ]
+    for env_var, role, field in _role_env_map:
+        val = os.environ.get(env_var)
+        if val is not None and val.strip() != "":
+            config.setdefault("llm_roles", {}).setdefault(role, {})[field] = val
+
     return config
 
 
@@ -142,6 +166,7 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     "prompt_cache_prior_pack_budget_chars": 8000,
     "prompt_cache_memory_budget_chars": 6000,
     # LLM settings
+    # Per-role LLM routing overrides live in "llm_roles" below (cutover = env flip; see that block).
     "llm_provider": "deepseek",
     "deep_think_llm": "deepseek-v4-pro",     # V4 thinking flagship; deep reasoning / synthesis (effort=max)
     "quick_think_llm": "deepseek-v4-flash",  # V4 thinking fast model; analyst tool loops (default effort)
@@ -265,9 +290,40 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
         "schedule_local_time": "07:00",
         "watchlist_source": "db",
     },
+    # Per-role LLM routing. Each entry resolves role -> override -> global default
+    # via create_role_llm() (Task 5). Defaults are all-None so production behavior
+    # is unchanged until the env vars below are set (shadow/cutover = config-only).
+    # Env overrides: IIC_TRIAGE_LLM_PROVIDER, IIC_TRIAGE_LLM_MODEL,
+    #                IIC_ALERT_GATE_LLM_PROVIDER, IIC_ALERT_GATE_LLM_MODEL
+    # Applied in _apply_nested_env_overrides (cannot use flat _ENV_OVERRIDES for
+    # nested keys). LOCAL_LLM_BASE_URL is resolved per-request in
+    # openai_client._resolve_provider_base_url and is NOT mirrored here.
+    # fallback (Task 15 / D5): "none" (default — a dead local endpoint refuses
+    # to start / skips cycles) or "api" (after fallback_threshold consecutive
+    # runtime failures — or a failed startup probe — the role re-resolves to
+    # the GLOBAL provider, hard-bounded by fallback_daily_budget calls per UTC
+    # day). The budget key only matters when fallback="api", so the all-None
+    # production-default behavior is unchanged. fallback_threshold ALSO arms
+    # the Task 17 endpoint-down self-alert in every fallback mode: when a
+    # daemon's consecutive-failure run reaches it, ONE operator self-alert is
+    # emitted per outage (tradingagents/ops/self_alert.py; re-armed on the
+    # next successful call).
+    "llm_roles": {
+        "triage_salience": {"provider": None, "model": None, "base_url": None,
+                            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+                            "fallback": "none",
+                            "fallback_threshold": 3,
+                            "fallback_daily_budget": 500},
+        "alert_gate":      {"provider": None, "model": None, "base_url": None,
+                            "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+                            "fallback": "none",
+                            "fallback_threshold": 3,
+                            "fallback_daily_budget": 500},
+    },
     "refinement": {
         "max_depth": 3,
-        "classifier_llm": "quick_think_llm",
+        # NOTE: classifier_llm was removed (IIC-FORGE-05 Task 4 — dead key,
+        # subsumed by the llm_roles per-role routing block above).
         "action_expires_hours": 24,
     },
     "action_handler": {

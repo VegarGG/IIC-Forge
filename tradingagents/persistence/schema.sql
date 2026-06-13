@@ -292,3 +292,113 @@ CREATE INDEX IF NOT EXISTS idx_brief_actions_result_job
 -- (sqlite does not support it on ALTER TABLE).
 ALTER TABLE costs ADD COLUMN cache_hit_tokens  INTEGER;
 ALTER TABLE costs ADD COLUMN cache_miss_tokens INTEGER;
+
+-- ============================================================
+-- Task 10: evaluator telemetry columns on alert_evaluations
+-- ============================================================
+-- Same idempotent-ALTER pattern as above — db.py swallows the
+-- "duplicate column name" error on re-run; no IF NOT EXISTS
+-- (sqlite does not support it on ALTER TABLE).
+ALTER TABLE alert_evaluations ADD COLUMN model_id    TEXT;
+ALTER TABLE alert_evaluations ADD COLUMN parse_ok    INTEGER;
+ALTER TABLE alert_evaluations ADD COLUMN latency_ms  INTEGER;
+
+-- ============================================================
+-- Task 13: shadow_eval — per-call rows from the replay harness
+-- ============================================================
+-- Each row records one event replayed through BOTH the API quick model and a
+-- local candidate model.  A row may exercise one role only:
+--   * Triage role only  → api_salience/local_salience/salience_delta set;
+--                          api_verdict/local_verdict are NULL.
+--   * Alert-gate only   → api_verdict/local_verdict set;
+--                          salience columns are NULL.
+--   * Both roles        → all columns non-NULL.
+--
+-- Column semantics:
+--   shadow_id       — autoincrement surrogate PK; defines insertion order.
+--   event_id        — TEXT (NOT NULL): the replayed event.  Intentionally a
+--                     plain TEXT column with NO FK to events(event_id) so that
+--                     shadow evidence rows are immune to event-lifecycle
+--                     operations (deletions or pruning).  Sibling tables such
+--                     as event_ticker and event_fingerprints use FK + ON DELETE
+--                     CASCADE; we deviate here so that shadow rows survive event
+--                     deletion and remain available for the Task-14 reporter.
+--   model_id        — TEXT NOT NULL: identifier of the candidate model under
+--                     test (e.g. "deepseek-r1-0528").
+--   api_salience    — REAL nullable: salience score produced by the API model
+--                     for the triage role.  NULL for verdict-only rows.
+--   local_salience  — REAL nullable: salience score produced by the local
+--                     candidate.  NULL for verdict-only rows.
+--   salience_delta  — REAL nullable: local_salience − api_salience, stored
+--                     explicitly (derivable but pre-computed by the harness for
+--                     direct MAE queries).  NULL for verdict-only rows or when
+--                     either salience is NULL.
+--   api_verdict     — TEXT nullable: 'pass'/'reject' from the API alert-gate.
+--                     NULL for triage-only rows.
+--   local_verdict   — TEXT nullable: 'pass'/'reject' from the local
+--                     alert-gate.  NULL for triage-only rows.
+--   parse_ok        — INTEGER (0/1 NOT NULL): whether the local model's
+--                     response was successfully parsed by the harness.  The
+--                     harness gates on parse failures; this column enables
+--                     per-model parse-failure-rate analysis.
+--   latency_ms      — INTEGER nullable: wall-clock latency of the LOCAL model
+--                     call in milliseconds.  NULL if not measured.
+--   created_ts      — TEXT NOT NULL: UTC ISO-8601 timestamp when this row was
+--                     written (same convention as all other created_ts columns
+--                     in this schema).
+CREATE TABLE IF NOT EXISTS shadow_eval (
+    shadow_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id        TEXT    NOT NULL,               -- plain TEXT; no FK (see comment above)
+    model_id        TEXT    NOT NULL,               -- candidate model under test
+    api_salience    REAL,                           -- API triage score; NULL for verdict-only rows
+    local_salience  REAL,                           -- local triage score; NULL for verdict-only rows
+    salience_delta  REAL,                           -- local − api; NULL when salience not exercised
+    api_verdict     TEXT,                           -- 'pass'/'reject'; NULL for triage-only rows
+    local_verdict   TEXT,                           -- 'pass'/'reject'; NULL for triage-only rows
+    parse_ok        INTEGER NOT NULL,               -- 1 = local parse succeeded; 0 = failed
+    latency_ms      INTEGER,                        -- local model wall-clock latency (ms)
+    created_ts      TEXT    NOT NULL                -- UTC ISO-8601 string
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_eval_model ON shadow_eval(model_id);
+
+-- ============================================================
+-- Task 15: availability policy (D5) — deferred salience + ops counters
+-- ============================================================
+-- events.salience_source records HOW the salience value was produced:
+--   'llm'      — scored by a live model call
+--   'cache'    — served from the Redis salience cache
+--   'deferred' — the scorer could not produce a score (LLM endpoint or parse
+--                failure); salience is NULL (un-scored — can never cross the
+--                promote threshold, which uses `salience >= ?`) and dedupe
+--                fingerprints/embeddings are deliberately NOT recorded so a
+--                redelivery of the same payload is RE-SCORED instead of being
+--                swallowed as a duplicate.
+-- NULL for rows written before this migration and for duplicate rows.
+-- Same idempotent-ALTER pattern as above — db.py swallows the "duplicate
+-- column name" error on re-run; no IF NOT EXISTS (unsupported on ALTER TABLE).
+ALTER TABLE events ADD COLUMN salience_source TEXT;
+
+-- Small persistent ops counters (name → monotonically increasing value),
+-- written by the availability layer (AvailabilityCounter / DailyFallbackBudget
+-- in tradingagents/llm_clients/availability.py).  Persisted — rather than
+-- in-memory only — because the L3 soak gate must query "failure counter = 0"
+-- across daemon restarts (an in-memory counter dies with the process).
+-- Names in use:
+--   'triage_llm_failures'
+--       — monotonic, per-EVENT: one bump per envelope whose salience the
+--         scorer deferred, INCLUDING parse_error defers (transport fine,
+--         model emitted garbage);
+--   'promoter_llm_failures'
+--       — monotonic, per-CYCLE: one bump per poll cycle skipped on a gate
+--         TRANSPORT failure only; a gate parse failure counts NOTHING
+--         (neither bump nor consecutive-run reset).
+--   UNITS therefore differ between the two daemons (events vs cycles, parse
+--   failures counted vs ignored) — deliberate asymmetry, compare with care;
+--   full rationale in availability.py's module docstring.
+--   'triage_fallback_calls:<YYYY-MM-DD>', 'promoter_fallback_calls:<YYYY-MM-DD>'
+--       — per-UTC-day fallback API call counts (hard daily budget enforcement).
+CREATE TABLE IF NOT EXISTS ops_counters (
+    name       TEXT PRIMARY KEY,
+    value      INTEGER NOT NULL DEFAULT 0,
+    updated_ts TEXT NOT NULL
+);

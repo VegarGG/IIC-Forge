@@ -49,7 +49,23 @@ with tab_briefs:
 
 with tab_costs:
     st.header("Daily cost trend")
-    from tradingagents.dashboard.panels.costs import fetch_daily_cost_trend
+    from tradingagents.dashboard.panels.costs import (
+        fetch_daily_cost_trend,
+        fetch_provider_split,
+    )
+
+    # Provider split — local vs API call volume and API spend.
+    # Post-cutover target: api_spend -> 0 for gate/triage workloads.
+    split = fetch_provider_split(_conn())
+    split_cols = st.columns(5)
+    split_cols[0].metric("Local calls", split["local_calls"])
+    split_cols[1].metric("API calls", split["api_calls"])
+    split_cols[2].metric("Free calls", split["free_calls"])
+    split_cols[3].metric("Unknown calls", split["unknown_calls"])
+    split_cols[4].metric("API spend ($)", f"{split['api_spend']:.4f}")
+
+    st.divider()
+
     rows = fetch_daily_cost_trend(_conn(), days=30)
     if not rows:
         st.info("No cost data yet.")

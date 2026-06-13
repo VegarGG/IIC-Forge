@@ -86,8 +86,24 @@ _MINIMAX_THINKING = ModelCapabilities(
 _DEFAULT = ModelCapabilities(
     supports_tool_choice=True,
     supports_json_mode=True,
-    supports_json_schema=True,
+    # Fail-closed: json_schema binding is opt-in per explicit capability row.
+    # An unrowed model (qwen-max, glm-4.x, openrouter slugs, etc.) must never
+    # receive response_format=json_schema — that hard-400s from unknown providers
+    # and crash-loops triage or bricks the evaluator.  Only rows that have been
+    # verified against the provider's API spec set supports_json_schema=True.
+    supports_json_schema=False,
     preferred_structured_method="function_calling",
+)
+
+# Local llama-server (llama.cpp) models support grammar-constrained decoding
+# via the json_schema response_format extension. Neither candidate GGUF needs
+# a reasoning-content round-trip; tool_choice is unsupported by llama.cpp's
+# OpenAI-compatible endpoint.
+_LOCAL_CLASSIFIER = ModelCapabilities(
+    supports_tool_choice=False,
+    supports_json_mode=True,
+    supports_json_schema=True,
+    preferred_structured_method="json_schema",
 )
 
 
@@ -97,6 +113,11 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "deepseek-reasoner": _DEEPSEEK_THINKING,
     "deepseek-v4-flash": _DEEPSEEK_THINKING,
     "deepseek-v4-pro": _DEEPSEEK_THINKING,
+    # Local GGUF classifier candidates (llama.cpp / llama-server).
+    # Exact IDs override the broader ^deepseek-v\d pattern so the GGUF
+    # variants get json_schema caps rather than the thinking-model profile.
+    "qwen3.6-27b-instruct-q4_k_m": _LOCAL_CLASSIFIER,
+    "deepseek-v4-flash-gguf-q4_k_m": _LOCAL_CLASSIFIER,
     # MiniMax — full official model lineup per
     # platform.minimax.io/docs/api-reference/text-openai-api
     "MiniMax-M2.7": _MINIMAX_THINKING,
@@ -108,9 +129,23 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "MiniMax-M2": _MINIMAX_THINKING,
 }
 
-# Forward-compat patterns. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``
-# or ``MiniMax-M3*`` variants inherit the thinking-mode quirks automatically.
+# Forward-compat patterns. First match wins, so more-specific patterns must
+# come before broader ones. Local GGUF prefixes (e.g. ``^deepseek-v4-flash-gguf``)
+# must precede the broad API-model patterns (e.g. ``^deepseek-v\d``) so that
+# future quant variants like ``deepseek-v4-flash-gguf-q5_k_m`` resolve to
+# ``_LOCAL_CLASSIFIER`` rather than silently falling through to
+# ``_DEEPSEEK_THINKING``. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``
+# or ``MiniMax-M3*`` variants still inherit the thinking-mode quirks
+# automatically via the broader patterns further down the list.
 _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
+    # More-specific local GGUF patterns first — must precede the broader
+    # ^deepseek-v\d patterns so quant suffixes get _LOCAL_CLASSIFIER.
+    # ^qwen3\.6-27b-instruct matches all quant variants (e.g. -q4_k_m, -q8_0)
+    # while staying narrower than a hypothetical hosted qwen3.6-27b API model.
+    (re.compile(r"^deepseek-v4-flash-gguf"), _LOCAL_CLASSIFIER),
+    (re.compile(r"^qwen3\.6-27b-instruct"), _LOCAL_CLASSIFIER),
+    # Broader API-model patterns follow; these only fire when no specific
+    # GGUF prefix matched above.
     (re.compile(r"^deepseek-v\d"), _DEEPSEEK_THINKING),
     (re.compile(r"^deepseek-reasoner"), _DEEPSEEK_THINKING),
     (re.compile(r"^MiniMax-M\d"), _MINIMAX_THINKING),
@@ -125,3 +160,15 @@ def get_capabilities(model_name: str) -> ModelCapabilities:
         if pattern.match(model_name):
             return caps
     return _DEFAULT
+
+
+def is_default_caps(caps: ModelCapabilities) -> bool:
+    """Return True when ``caps`` is the ``_DEFAULT`` sentinel object.
+
+    Use this to detect models that had no explicit capability row — the caller
+    can warn the operator that json_schema binding is silently inactive.
+    Identity comparison is safe because ``_DEFAULT`` is a module-level
+    singleton (frozen dataclass); every unknown model resolves to the exact
+    same object.
+    """
+    return caps is _DEFAULT
