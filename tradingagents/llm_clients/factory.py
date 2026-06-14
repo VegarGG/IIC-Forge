@@ -60,7 +60,9 @@ def create_llm_client(
     raise ValueError(f"Unsupported LLM provider: {provider}")
 
 
-def create_role_llm(role: str, config: Dict[str, Any]) -> BaseLLMClient:
+def create_role_llm(
+    role: str, config: Dict[str, Any], *, api_key: Optional[str] = None
+) -> BaseLLMClient:
     """Resolve a role name to a fully configured LLM client.
 
     Resolution order (or-fallback, so empty string is treated as unset):
@@ -82,6 +84,10 @@ def create_role_llm(role: str, config: Dict[str, Any]) -> BaseLLMClient:
                 bug — raises ``KeyError`` naming the role and available roles.
         config: Mapping containing at minimum ``llm_provider``,
                 ``quick_think_llm``, and ``llm_roles``.
+        api_key: Optional explicit API key forwarded to the underlying client.
+            When truthy it takes precedence over the provider's env-var key and
+            suppresses the missing-env-var raise; defaults to None (env-based
+            resolution unchanged for every existing caller).
 
     Returns:
         Configured :class:`BaseLLMClient` instance.
@@ -127,6 +133,11 @@ def create_role_llm(role: str, config: Dict[str, Any]) -> BaseLLMClient:
     kwargs = {}
     if extra_body:
         kwargs["extra_body"] = copy.deepcopy(extra_body)
+    if api_key:
+        # Explicit per-client key (e.g. the isolated classification-fallback
+        # key). Forwarded only when truthy so normal env-based resolution is
+        # untouched for every existing caller.
+        kwargs["api_key"] = api_key
 
     return create_llm_client(
         provider=provider, model=model, base_url=base_url, **kwargs
