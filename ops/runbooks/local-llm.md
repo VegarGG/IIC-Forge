@@ -151,6 +151,40 @@ and the self-alert (section 6 below) notifies the operator instead.
 
 ---
 
+## 3b. Early-testing fallback (isolated, removable key)
+
+For the early-testing phase you can let triage/promoter keep running on the
+cloud when the local model is down, using a **dedicated, throwaway key** that is
+structurally separate from the workers' persistent `DEEPSEEK_API_KEY`. Set these
+in your **private `.env` only** — never in `ops/env.iic-forge.example`:
+
+```dotenv
+IIC_LLM_FALLBACK_MODE=api            # both classification roles → cloud on local outage
+IIC_LLM_FALLBACK_DAILY_BUDGET=500    # hard per-UTC-day cap (compiled default; tune to taste)
+IIC_LLM_FALLBACK_API_KEY=<throwaway-testing-key>   # SEPARATE from DEEPSEEK_API_KEY
+# DEEPSEEK_API_KEY stays the workers' persistent key — do NOT reuse it above.
+```
+
+Activate and verify:
+
+```bash
+docker compose restart triage promoter
+docker compose logs --tail=20 triage   | grep -E 'resolved:|fallback'
+docker compose logs --tail=20 promoter | grep -E 'resolved:|fallback'
+```
+
+The classification fallback authenticates **only** with `IIC_LLM_FALLBACK_API_KEY`.
+If it is unset while `IIC_LLM_FALLBACK_MODE=api`, the fallback **refuses** (it
+never borrows the worker key) and each daemon logs a startup warning naming the
+missing variable. The same warning fires if `IIC_LLM_FALLBACK_DAILY_BUDGET=0`.
+
+**Post-deployment teardown:** remove `IIC_LLM_FALLBACK_API_KEY` *and* set
+`IIC_LLM_FALLBACK_MODE=none` (or drop it), then `docker compose restart triage
+promoter`. Either lock alone severs the classification fallback; the workers'
+`DEEPSEEK_API_KEY` is untouched.
+
+---
+
 ## 4. Model-swap procedure
 
 A model swap replaces the GGUF file and restarts llama-server. **No IIC code
