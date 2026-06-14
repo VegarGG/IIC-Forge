@@ -44,3 +44,37 @@ def test_create_role_llm_forwards_explicit_api_key(monkeypatch):
     client = create_role_llm(
         "triage_salience", _cfg_global_deepseek(), api_key="sk-role")
     assert client.get_llm().openai_api_key.get_secret_value() == "sk-role"
+
+
+@pytest.mark.unit
+def test_resolve_role_llm_global_injects_fallback_key(monkeypatch):
+    from tradingagents.llm_clients.availability import resolve_role_llm_global
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("IIC_LLM_FALLBACK_API_KEY", "sk-fallback")
+    client = resolve_role_llm_global("triage_salience", _cfg_global_deepseek())
+    assert client.get_llm().openai_api_key.get_secret_value() == "sk-fallback"
+
+
+@pytest.mark.unit
+def test_resolve_role_llm_global_refuses_without_key(monkeypatch):
+    from tradingagents.llm_clients.availability import (
+        LocalEndpointUnavailable, resolve_role_llm_global,
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "worker-key")
+    monkeypatch.delenv("IIC_LLM_FALLBACK_API_KEY", raising=False)
+    with pytest.raises(LocalEndpointUnavailable, match="IIC_LLM_FALLBACK_API_KEY"):
+        resolve_role_llm_global("triage_salience", _cfg_global_deepseek())
+
+
+@pytest.mark.unit
+def test_fallback_key_isolated_from_worker_key(monkeypatch):
+    """The worker client uses DEEPSEEK_API_KEY; the classification fallback
+    uses IIC_LLM_FALLBACK_API_KEY. The two never share a credential."""
+    from tradingagents.llm_clients.availability import resolve_role_llm_global
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "worker-key")
+    monkeypatch.setenv("IIC_LLM_FALLBACK_API_KEY", "test-key")
+    worker = create_llm_client(provider="deepseek", model="deepseek-chat").get_llm()
+    fallback = resolve_role_llm_global(
+        "triage_salience", _cfg_global_deepseek()).get_llm()
+    assert worker.openai_api_key.get_secret_value() == "worker-key"
+    assert fallback.openai_api_key.get_secret_value() == "test-key"

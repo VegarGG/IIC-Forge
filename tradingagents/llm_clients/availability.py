@@ -348,11 +348,36 @@ def resolve_role_llm_global(role: str, config: Dict[str, Any]):
 
     Used for both the startup fallback (dead probe + fallback="api") and the
     runtime fallback (consecutive-failure threshold crossed).  Loudly logged.
+
+    The classification fallback authenticates ONLY with the dedicated,
+    removable ``IIC_LLM_FALLBACK_API_KEY`` — it never borrows the worker's
+    global provider key (e.g. ``DEEPSEEK_API_KEY``).  Absent that key the
+    fallback is unavailable: we raise rather than silently sharing a credential
+    (structural isolation, design 2026-06-13).
+
+    Resolution strips the role override, so the fallback uses the GLOBAL
+    ``llm_provider``/``quick_think_llm`` with ``IIC_LLM_FALLBACK_API_KEY`` as
+    that provider's credential. (If the global provider is itself ``local``,
+    the dedicated key is sent as the local server's auth header instead of
+    ``LOCAL_LLM_API_KEY`` — use per-role overrides, not a global ``local``
+    provider, if that matters.)
     """
+    fallback_key = os.environ.get("IIC_LLM_FALLBACK_API_KEY")
+    if not fallback_key:
+        log.error(
+            "role %s: fallback=api engaged but IIC_LLM_FALLBACK_API_KEY is not "
+            "set; refusing to engage the cloud fallback (it never borrows the "
+            "worker key)", role,
+        )
+        raise LocalEndpointUnavailable(
+            f"role {role}: fallback=api engaged but IIC_LLM_FALLBACK_API_KEY "
+            f"is not set; refusing to borrow the global provider key"
+        )
     # Module-attribute access (not from-import) so tests that patch
     # ``factory.create_role_llm`` intercept this call too.
     from tradingagents.llm_clients import factory
-    client = factory.create_role_llm(role, strip_role_override(config, role))
+    client = factory.create_role_llm(
+        role, strip_role_override(config, role), api_key=fallback_key)
     # getattr-defensive: tests patch create_role_llm with minimal fakes that
     # may lack base_url/get_provider_name.
     provider_name = getattr(client, "get_provider_name", lambda: "?")()
