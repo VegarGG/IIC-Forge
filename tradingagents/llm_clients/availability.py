@@ -455,3 +455,34 @@ def resolve_role_llm_with_fallback(
     log.info("role %s startup probe OK: endpoint=%s model=%s",
              role, base_url, client.model)
     return client, False
+
+
+def warn_if_fallback_unsatisfiable(
+    role: str, fallback_mode: Optional[str], max_per_day: float, *,
+    fallback_key_present: bool, log: logging.Logger,
+) -> None:
+    """Loudly warn at startup when ``fallback=api`` can never actually fire.
+
+    Two unsatisfiable configs are surfaced (either or both):
+      - the per-UTC-day budget is non-positive (every fallback call is denied);
+      - the dedicated ``IIC_LLM_FALLBACK_API_KEY`` is absent (the fallback
+        refuses rather than borrowing the worker key).
+
+    Every other combination — including the fail-closed production default
+    (``fallback="none"``) — is a silent no-op.
+    """
+    if (fallback_mode or "none").strip().lower() != "api":
+        return
+    if max_per_day <= 0:
+        log.warning(
+            "role %s: fallback=api but daily budget is %s (<=0); the fallback "
+            "will NEVER fire. Set IIC_LLM_FALLBACK_DAILY_BUDGET > 0 to enable it.",
+            role, max_per_day,
+        )
+    if not fallback_key_present:
+        log.warning(
+            "role %s: fallback=api but IIC_LLM_FALLBACK_API_KEY is not set; the "
+            "fallback will REFUSE (it never borrows the worker key). Set "
+            "IIC_LLM_FALLBACK_API_KEY to enable it.",
+            role,
+        )

@@ -78,3 +78,44 @@ def test_fallback_key_isolated_from_worker_key(monkeypatch):
         "triage_salience", _cfg_global_deepseek()).get_llm()
     assert worker.openai_api_key.get_secret_value() == "worker-key"
     assert fallback.openai_api_key.get_secret_value() == "test-key"
+
+
+_LOG = logging.getLogger("test.fallback.guardrail")
+
+
+@pytest.mark.unit
+def test_guardrail_warns_when_api_and_budget_zero(caplog):
+    from tradingagents.llm_clients.availability import warn_if_fallback_unsatisfiable
+    caplog.set_level(logging.WARNING)
+    warn_if_fallback_unsatisfiable("triage_salience", "api", 0,
+                                   fallback_key_present=True, log=_LOG)
+    assert "triage_salience" in caplog.text
+    assert "budget" in caplog.text.lower()
+
+
+@pytest.mark.unit
+def test_guardrail_warns_when_api_and_key_missing(caplog):
+    from tradingagents.llm_clients.availability import warn_if_fallback_unsatisfiable
+    caplog.set_level(logging.WARNING)
+    warn_if_fallback_unsatisfiable("alert_gate", "api", 500,
+                                   fallback_key_present=False, log=_LOG)
+    assert "alert_gate" in caplog.text
+    assert "IIC_LLM_FALLBACK_API_KEY" in caplog.text
+
+
+@pytest.mark.unit
+def test_guardrail_silent_when_satisfiable(caplog):
+    from tradingagents.llm_clients.availability import warn_if_fallback_unsatisfiable
+    caplog.set_level(logging.WARNING)
+    warn_if_fallback_unsatisfiable("triage_salience", "api", 500,
+                                   fallback_key_present=True, log=_LOG)
+    assert caplog.text == ""
+
+
+@pytest.mark.unit
+def test_guardrail_silent_when_fallback_none(caplog):
+    from tradingagents.llm_clients.availability import warn_if_fallback_unsatisfiable
+    caplog.set_level(logging.WARNING)
+    warn_if_fallback_unsatisfiable("triage_salience", "none", 0,
+                                   fallback_key_present=False, log=_LOG)
+    assert caplog.text == ""
