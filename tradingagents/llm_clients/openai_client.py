@@ -215,24 +215,34 @@ class OpenAIClient(BaseLLMClient):
         # provider default so users can route through their own gateway.
         if self.provider in _PROVIDER_BASE_URL:
             llm_kwargs["base_url"] = self.base_url or _resolve_provider_base_url(self.provider)
-            api_key_env = get_api_key_env(self.provider)
-            if api_key_env:
-                api_key = os.environ.get(api_key_env)
-                if api_key:
-                    llm_kwargs["api_key"] = api_key
-                elif is_optional_key(self.provider):
-                    # Optional-key providers (e.g. local/llama-server on a LAN)
-                    # work without authentication; fall through to the sentinel
-                    # so ChatOpenAI does not complain about a missing key.
-                    llm_kwargs["api_key"] = "local"
-                else:
-                    raise ValueError(
-                        f"API key for provider '{self.provider}' is not set. "
-                        f"Please set the {api_key_env} environment variable "
-                        f"(e.g. add {api_key_env}=your_key to your .env file)."
-                    )
+            # An explicit api_key (e.g. the isolated classification-fallback key
+            # injected by availability.resolve_role_llm_global) takes precedence
+            # over the provider-mapped env var and skips the missing-env-var
+            # raise. This lets one process authenticate different clients with
+            # different keys (the worker's DEEPSEEK_API_KEY vs. a throwaway
+            # classification-fallback key) without sharing credentials.
+            explicit_key = self.kwargs.get("api_key")
+            if explicit_key:
+                llm_kwargs["api_key"] = explicit_key
             else:
-                llm_kwargs["api_key"] = "ollama"
+                api_key_env = get_api_key_env(self.provider)
+                if api_key_env:
+                    api_key = os.environ.get(api_key_env)
+                    if api_key:
+                        llm_kwargs["api_key"] = api_key
+                    elif is_optional_key(self.provider):
+                        # Optional-key providers (e.g. local/llama-server on a
+                        # LAN) work without authentication; fall through to the
+                        # sentinel so ChatOpenAI does not complain.
+                        llm_kwargs["api_key"] = "local"
+                    else:
+                        raise ValueError(
+                            f"API key for provider '{self.provider}' is not set. "
+                            f"Please set the {api_key_env} environment variable "
+                            f"(e.g. add {api_key_env}=your_key to your .env file)."
+                        )
+                else:
+                    llm_kwargs["api_key"] = "ollama"
         elif self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
