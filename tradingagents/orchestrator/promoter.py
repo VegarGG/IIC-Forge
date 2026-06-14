@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -171,7 +172,7 @@ def main(config: Optional[dict] = None) -> None:
         PROMOTER_FAILURE_COUNTER, PROMOTER_FALLBACK_BUDGET,
         TRANSPORT_EXCEPTIONS, AvailabilityCounter, DailyFallbackBudget,
         LocalEndpointUnavailable, resolve_role_llm_global,
-        resolve_role_llm_with_fallback,
+        resolve_role_llm_with_fallback, warn_if_fallback_unsatisfiable,
     )
     cfg = dict(DEFAULT_CONFIG)
     if config:
@@ -196,6 +197,12 @@ def main(config: Optional[dict] = None) -> None:
     role_cfg = cfg.get("llm_roles", {}).get("alert_gate", {}) or {}
     fallback_mode = (role_cfg.get("fallback") or "none").lower()
     fallback_threshold = int(role_cfg.get("fallback_threshold", 3))
+    fallback_max_per_day = int(role_cfg.get("fallback_daily_budget", 500))
+    warn_if_fallback_unsatisfiable(
+        "alert_gate", fallback_mode, fallback_max_per_day,
+        fallback_key_present=bool(os.environ.get("IIC_LLM_FALLBACK_API_KEY")),
+        log=log,
+    )
     primary_is_local = (
         (role_cfg.get("provider") or cfg.get("llm_provider") or "").lower()
         == "local"
@@ -226,7 +233,7 @@ def main(config: Optional[dict] = None) -> None:
         on_threshold=alerter.endpoint_down_callback)
     fallback_budget = DailyFallbackBudget(
         name=PROMOTER_FALLBACK_BUDGET,
-        max_per_day=int(role_cfg.get("fallback_daily_budget", 500)),
+        max_per_day=fallback_max_per_day,
         conn=conn,
     )
     # Mutable holder so the loop's fallback engagement can swap the evaluator

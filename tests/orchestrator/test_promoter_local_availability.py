@@ -438,3 +438,36 @@ def test_runtime_fallback_budget_exhausted_reverts_to_skipping(
     check = connect(cfg["iic_db_path"])
     # c2, c3 = transport failures; c4 = budget-exhausted skip. All counted.
     assert store.get_ops_counter(check, name="promoter_llm_failures") == 3
+
+
+@pytest.mark.unit
+def test_main_warns_and_refuses_when_fallback_key_missing(
+    tmp_path, caplog, monkeypatch
+):
+    from tradingagents.llm_clients.availability import LocalEndpointUnavailable
+    from tradingagents.orchestrator.promoter import main
+
+    caplog.set_level(logging.INFO)
+    monkeypatch.delenv("IIC_LLM_FALLBACK_API_KEY", raising=False)
+    dead = _dead_base_url()
+    cfg = _cfg(tmp_path, gate_role=_gate_role(
+        provider="local", model="local-gate-model",
+        base_url=dead, fallback="api"))
+
+    with pytest.raises(LocalEndpointUnavailable):
+        main(config=cfg)
+
+    # The guardrail fired at startup from the promoter's OWN logger (distinct
+    # from the resolver's refuse log, which uses the availability logger).
+    # This proves warn_if_fallback_unsatisfiable was wired into _main.
+    guardrail = [
+        r for r in caplog.records
+        if r.name == "tradingagents.orchestrator.promoter"
+        and "IIC_LLM_FALLBACK_API_KEY" in r.getMessage()
+        and r.levelno == logging.WARNING
+    ]
+    assert guardrail, (
+        "expected a guardrail WARNING from the promoter logger naming "
+        "IIC_LLM_FALLBACK_API_KEY"
+    )
+    assert any("alert_gate" in r.getMessage() for r in guardrail)
