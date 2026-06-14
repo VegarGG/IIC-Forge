@@ -578,3 +578,57 @@ def test_daily_fallback_budget_is_bounded_and_persisted(conn):
     # stays exhausted — the budget cannot be reset by restarting the daemon.
     b2 = DailyFallbackBudget(name="t_budget", max_per_day=2, conn=conn)
     assert b2.try_consume() is False
+
+
+@pytest.mark.unit
+def test_main_warns_and_refuses_when_fallback_key_missing(
+    monkeypatch, tmp_path, caplog
+):
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.llm_clients.availability import LocalEndpointUnavailable
+
+    caplog.set_level(logging.INFO)
+    dead = _dead_base_url()
+
+    import tradingagents.sensing.redis_client as redis_mod
+    monkeypatch.setattr(redis_mod, "make_redis", lambda url: object())
+    import tradingagents.sensing.embeddings as emb_mod
+
+    class _FakeEmbedder:
+        def load(self):
+            pass
+
+    monkeypatch.setattr(emb_mod, "SentenceTransformerEmbedder",
+                        lambda model: _FakeEmbedder())
+
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("IIC_LLM_FALLBACK_API_KEY", raising=False)
+    monkeypatch.setitem(DEFAULT_CONFIG, "iic_db_path", str(tmp_path / "iic.db"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "iic_data_dir", str(tmp_path / "data"))
+    monkeypatch.setitem(DEFAULT_CONFIG, "llm_roles", {
+        "triage_salience": _role_entry(
+            provider="local", model="test-local-model",
+            base_url=dead, fallback="api"),
+        "alert_gate": _role_entry(),
+    })
+
+    from tradingagents.sensing.triage import _main
+    with pytest.raises(LocalEndpointUnavailable):
+        _main()
+
+    # Faithful wiring assertion: the guardrail warning must come from triage's
+    # OWN logger (distinct from the availability-module resolver log, which also
+    # mentions the env var). This proves warn_if_fallback_unsatisfiable was
+    # wired into _main with log=log.
+    guardrail = [
+        r for r in caplog.records
+        if r.name == "tradingagents.sensing.triage"
+        and "IIC_LLM_FALLBACK_API_KEY" in r.getMessage()
+        and r.levelno == logging.WARNING
+    ]
+    assert guardrail, (
+        "expected a guardrail WARNING from the triage logger naming "
+        "IIC_LLM_FALLBACK_API_KEY"
+    )
+    assert any("triage_salience" in r.getMessage() for r in guardrail)

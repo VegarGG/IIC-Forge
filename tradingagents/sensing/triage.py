@@ -635,12 +635,24 @@ def _main() -> None:
     # embedder load below).  fallback="none" → refuse to start;
     # fallback="api" → re-resolve to the global API provider (logged,
     # budget-bounded per call).
+    # Before the probe, warn_if_fallback_unsatisfiable() loudly flags a
+    # fallback="api" config that can never fire (missing IIC_LLM_FALLBACK_API_KEY
+    # or zero budget), regardless of probe outcome.
     from tradingagents.llm_clients.availability import (
         TRIAGE_FAILURE_COUNTER, TRIAGE_FALLBACK_BUDGET,
         AvailabilityCounter, DailyFallbackBudget, LocalEndpointUnavailable,
         resolve_role_llm_global, resolve_role_llm_with_fallback,
+        warn_if_fallback_unsatisfiable,
     )
     from tradingagents.sensing.salience import maybe_bind_salience_schema
+    role_cfg = C.get("llm_roles", {}).get("triage_salience", {}) or {}
+    fallback_mode = (role_cfg.get("fallback") or "none").lower()
+    fallback_max_per_day = int(role_cfg.get("fallback_daily_budget", 500))
+    warn_if_fallback_unsatisfiable(
+        "triage_salience", fallback_mode, fallback_max_per_day,
+        fallback_key_present=bool(os.environ.get("IIC_LLM_FALLBACK_API_KEY")),
+        log=log,
+    )
     quick_client, used_fallback = resolve_role_llm_with_fallback(
         "triage_salience", C)
     llm = quick_client.get_llm()
@@ -650,8 +662,6 @@ def _main() -> None:
     # unbound so they never receive an unsupported parameter.
     llm = maybe_bind_salience_schema(llm, quick_client.model)
 
-    role_cfg = C.get("llm_roles", {}).get("triage_salience", {}) or {}
-    fallback_mode = (role_cfg.get("fallback") or "none").lower()
     fallback_threshold = int(role_cfg.get("fallback_threshold", 3))
     primary_is_local = (
         (role_cfg.get("provider") or C.get("llm_provider") or "").lower()
@@ -704,7 +714,7 @@ def _main() -> None:
         on_threshold=alerter.endpoint_down_callback)
     fallback_budget = DailyFallbackBudget(
         name=TRIAGE_FALLBACK_BUDGET,
-        max_per_day=int(role_cfg.get("fallback_daily_budget", 500)),
+        max_per_day=fallback_max_per_day,
         conn=avail_conn, lock=avail_lock,
     )
     # Mutable holder so runtime fallback engagement can swap the model for
