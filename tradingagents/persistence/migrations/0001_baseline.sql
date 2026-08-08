@@ -1,10 +1,8 @@
--- IIC-FORGE F1 schema. Designed upfront per ADR-F4 (revised) so F2/F3/F5
+-- IIC-FORGE migration 0001: clean production baseline.
+-- Originally designed upfront per ADR-F4 (revised) so F2/F3/F5
 -- additions are append-only (new tables, no column reshapes).
 --
 -- All TIMESTAMP columns are ISO-8601 strings (TEXT) for SQLite portability.
-
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
 
 -- ============================================================
 -- F1 tables — populated from day one
@@ -13,7 +11,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS runs (
     run_id          TEXT PRIMARY KEY,           -- UUID4 hex
     ticker          TEXT NOT NULL,
-    persona_id      TEXT,                       -- nullable for legacy / non-persona runs
+    persona_id      TEXT,                       -- nullable for non-persona runs
     started_ts      TEXT NOT NULL,
     ended_ts        TEXT,
     status          TEXT NOT NULL,              -- "running" | "complete" | "error"
@@ -227,10 +225,8 @@ CREATE INDEX IF NOT EXISTS idx_event_embeddings_vec ON event_embeddings(vec_id);
 -- ============================================================
 -- F4 orchestrator append-only columns (added by IIC-FORGE-07)
 -- ============================================================
--- NOTE: ALTER TABLE ADD COLUMN is NOT idempotent in SQLite. The db.py
--- migration layer wraps these statements to swallow "duplicate column
--- name" errors, allowing connect() to be called repeatedly. Do NOT add
--- IF NOT EXISTS — sqlite does not support it on ALTER TABLE.
+-- These ALTER statements are intentionally part of immutable migration 0001.
+-- Migration history prevents them from being executed a second time.
 
 ALTER TABLE queue_jobs ADD COLUMN trigger_event_id  TEXT REFERENCES events(event_id);
 ALTER TABLE queue_jobs ADD COLUMN run_ids           TEXT;
@@ -286,19 +282,14 @@ CREATE INDEX IF NOT EXISTS idx_brief_actions_result_job
 -- DeepSeek's API reports per-call cache usage (prompt_cache_hit_tokens /
 -- prompt_cache_miss_tokens). We persist the per-(run, model) totals next to
 -- the existing in/out token counts so a cache hit ratio can be computed from
--- the DB. Both nullable: other providers don't report them, and rows written
--- before this migration keep NULL. Same idempotent-ALTER pattern as above —
--- db.py swallows the "duplicate column name" error on re-run; no IF NOT EXISTS
--- (sqlite does not support it on ALTER TABLE).
+-- the DB. Both are nullable because other providers do not report them.
 ALTER TABLE costs ADD COLUMN cache_hit_tokens  INTEGER;
 ALTER TABLE costs ADD COLUMN cache_miss_tokens INTEGER;
 
 -- ============================================================
 -- Task 10: evaluator telemetry columns on alert_evaluations
 -- ============================================================
--- Same idempotent-ALTER pattern as above — db.py swallows the
--- "duplicate column name" error on re-run; no IF NOT EXISTS
--- (sqlite does not support it on ALTER TABLE).
+-- Migration history ensures these statements execute once.
 ALTER TABLE alert_evaluations ADD COLUMN model_id    TEXT;
 ALTER TABLE alert_evaluations ADD COLUMN parse_ok    INTEGER;
 ALTER TABLE alert_evaluations ADD COLUMN latency_ms  INTEGER;
@@ -373,9 +364,7 @@ CREATE INDEX IF NOT EXISTS idx_shadow_eval_model ON shadow_eval(model_id);
 --                fingerprints/embeddings are deliberately NOT recorded so a
 --                redelivery of the same payload is RE-SCORED instead of being
 --                swallowed as a duplicate.
--- NULL for rows written before this migration and for duplicate rows.
--- Same idempotent-ALTER pattern as above — db.py swallows the "duplicate
--- column name" error on re-run; no IF NOT EXISTS (unsupported on ALTER TABLE).
+-- NULL for duplicate rows and any event whose source is not yet classified.
 ALTER TABLE events ADD COLUMN salience_source TEXT;
 
 -- Small persistent ops counters (name → monotonically increasing value),

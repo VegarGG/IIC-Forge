@@ -1,4 +1,3 @@
-import re
 from typing import Any, Optional
 
 from langchain_anthropic import ChatAnthropic
@@ -11,21 +10,22 @@ _PASSTHROUGH_KWARGS = (
     "callbacks", "http_client", "http_async_client", "effort",
 )
 
-# Anthropic's extended-thinking ``effort`` parameter is accepted by Opus 4.5+
-# and Sonnet 4.5+ only. Haiku (any version shipped to date) 400s with
-# ``"This model does not support the effort parameter"`` (#831). Future
-# ``claude-{opus,sonnet}-X-Y`` releases inherit effort support via the
-# forward-compat pattern below; future Haiku stays excluded by default.
-_EFFORT_EXACT = {
-    "claude-mythos-preview",  # non-standard preview name; effort-capable
+# Anthropic's extended-thinking ``effort`` parameter is accepted only by the
+# current catalogued Opus and Sonnet models below. Haiku rejects it with a 400.
+# Unknown future model IDs remain excluded until they are deliberately added to
+# both the shared model catalog and this allowlist.
+_EFFORT_MODELS = {
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
 }
-_EFFORT_PATTERN = re.compile(r"^claude-(opus|sonnet)-\d+-\d+$")
 
 
 def _supports_effort(model: str) -> bool:
     """Whether Anthropic accepts the ``effort`` parameter for this model."""
-    model_lc = model.lower()
-    return model_lc in _EFFORT_EXACT or bool(_EFFORT_PATTERN.match(model_lc))
+    return model.lower() in _EFFORT_MODELS
 
 
 class NormalizedChatAnthropic(ChatAnthropic):

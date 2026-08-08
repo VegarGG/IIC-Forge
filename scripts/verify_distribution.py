@@ -22,7 +22,7 @@ REQUIRED_PACKAGE_FILES = {
     "tradingagents/delivery/templates/telegram/event_alert.j2",
     "tradingagents/delivery/templates/telegram/event_alert_light.j2",
     "tradingagents/delivery/templates/telegram/morning_digest.j2",
-    "tradingagents/persistence/schema.sql",
+    "tradingagents/persistence/migrations/0001_baseline.sql",
     "tradingagents/personas/balanced.yaml",
     "tradingagents/personas/macro.yaml",
     "tradingagents/personas/momentum.yaml",

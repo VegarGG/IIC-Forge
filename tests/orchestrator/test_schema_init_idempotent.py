@@ -34,11 +34,11 @@ def test_idx_queue_jobs_trigger_event_present(tmp_path):
 
 @pytest.mark.unit
 def test_schema_init_is_idempotent(tmp_path):
-    """Running connect() twice on the same DB must not raise."""
+    """Running connect() twice on the same versioned DB must not raise."""
     db = str(tmp_path / "iic.db")
     conn1 = connect(db)
     conn1.close()
-    # Second open re-runs schema.sql; ALTER TABLE ADD COLUMN must be swallowed.
+    # Second open verifies the applied checksum without re-running migration SQL.
     conn2 = connect(db)
     cols = {c[1] for c in conn2.execute("PRAGMA table_info(queue_jobs)")}
     assert "trigger_event_id" in cols

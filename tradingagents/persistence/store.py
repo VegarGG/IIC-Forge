@@ -7,7 +7,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Iterable, Optional
+from datetime import datetime, timezone
+from typing import Iterable, Optional
+
+
+def _required_lastrowid(cursor: sqlite3.Cursor) -> int:
+    row_id = cursor.lastrowid
+    if row_id is None:
+        raise RuntimeError("SQLite insert completed without a row identifier")
+    return row_id
 
 
 # --------------------------------------------------------------------
@@ -120,19 +128,15 @@ def insert_brief_action(
         (brief_id, action_type, json.dumps(action_params), expires_at),
     )
     conn.commit()
-    return cur.lastrowid
+    return _required_lastrowid(cur)
 
 
 # --------------------------------------------------------------------
 # F3 helpers — events / event_ticker / watchlist / tickers / fingerprints
 # --------------------------------------------------------------------
 
-import json as _json
-from datetime import datetime as _dt, timezone as _tz
-
-
 def _now_iso() -> str:
-    return _dt.now(_tz.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def insert_event(
@@ -200,15 +204,15 @@ def upsert_watchlist(
         conn.execute(
             "INSERT INTO watchlist (ticker, added_ts, last_briefed, ttl_until, tags) "
             "VALUES (?, ?, ?, ?, ?)",
-            (ticker, now, now, ttl_until, _json.dumps(incoming_tags)),
+            (ticker, now, now, ttl_until, json.dumps(incoming_tags)),
         )
     else:
-        prior_tags = _json.loads(existing["tags"]) if existing["tags"] else []
+        prior_tags = json.loads(existing["tags"]) if existing["tags"] else []
         merged = sorted(set(prior_tags) | set(incoming_tags))
         conn.execute(
             "UPDATE watchlist SET last_briefed = ?, ttl_until = ?, tags = ? "
             "WHERE ticker = ?",
-            (now, ttl_until, _json.dumps(merged), ticker),
+            (now, ttl_until, json.dumps(merged), ticker),
         )
     conn.commit()
 
@@ -243,7 +247,7 @@ def upsert_ticker(
         "aliases = excluded.aliases, "
         "active = excluded.active, "
         "updated_ts = excluded.updated_ts",
-        (ticker, exchange, name, _json.dumps(list(aliases)),
+        (ticker, exchange, name, json.dumps(list(aliases)),
          1 if active else 0, _now_iso()),
     )
     conn.commit()
@@ -317,7 +321,7 @@ def insert_alert_evaluation(
         ),
     )
     conn.commit()
-    return cur.lastrowid
+    return _required_lastrowid(cur)
 
 
 def fetch_alert_eval_telemetry(
@@ -406,7 +410,7 @@ def insert_delivery(
         (brief_id, channel, status, sent_ts, channel_ref, skip_reason),
     )
     conn.commit()
-    return cur.lastrowid
+    return _required_lastrowid(cur)
 
 
 def resolve_brief_id_by_channel_ref(
@@ -643,7 +647,7 @@ def insert_shadow_eval(
         ),
     )
     conn.commit()
-    return cur.lastrowid
+    return _required_lastrowid(cur)
 
 
 def fetch_shadow_eval(
@@ -702,7 +706,7 @@ def fetch_shadow_eval(
 # (tradingagents/llm_clients/availability.py) and read by the L3 soak gate
 # ("failure counter = 0" must be queryable across daemon restarts) and the
 # Task 17 endpoint-down self-alert.  Counter names in use are documented on
-# the ops_counters table in schema.sql.
+# the ops_counters table in migration 0001.
 
 def bump_ops_counter(
     conn: sqlite3.Connection, *, name: str, delta: int = 1

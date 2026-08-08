@@ -94,7 +94,7 @@ cli = ["static/*.txt"]
     "templates/email/*.j2",
     "templates/telegram/*.j2",
 ]
-"tradingagents.persistence" = ["*.sql"]
+"tradingagents.persistence.migrations" = ["*.sql"]
 "tradingagents.personas" = ["*.yaml"]
 "tradingagents.secretary" = ["templates/*.j2"]
 "tradingagents.sensing" = ["data/*.yaml"]

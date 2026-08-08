@@ -38,6 +38,8 @@ def test_tickers_active_index(tmp_path):
 @pytest.mark.unit
 def test_status_enum_comment_extended_with_duplicate():
     from pathlib import Path
-    text = Path("tradingagents/persistence/schema.sql").read_text()
+    text = Path(
+        "tradingagents/persistence/migrations/0001_baseline.sql"
+    ).read_text()
     # Status comment line for `events.status` now documents the four-value enum.
     assert '"new" | "triaged" | "discarded" | "duplicate"' in text

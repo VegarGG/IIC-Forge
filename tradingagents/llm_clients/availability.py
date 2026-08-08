@@ -14,7 +14,7 @@ need to survive a local LLM endpoint outage WITHOUT silent degradation:
   - ``resolve_role_llm_with_fallback`` / ``resolve_role_llm_global`` — shared
     role resolution honoring the per-role ``fallback`` config ("none"/"api").
 
-Counter names (see also schema.sql's ops_counters comment):
+Counter names (see also migration 0001's ops_counters comment):
   TRIAGE_FAILURE_COUNTER / PROMOTER_FAILURE_COUNTER   — monotonic failures
   TRIAGE_FALLBACK_BUDGET / PROMOTER_FALLBACK_BUDGET   — '<name>:<YYYY-MM-DD>'
 

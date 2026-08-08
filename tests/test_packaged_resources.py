@@ -1,13 +1,13 @@
 from importlib.resources import files
 
 from tradingagents.delivery.render import _env as delivery_templates
-from tradingagents.persistence.db import _schema_text
+from tradingagents.persistence.db import _load_migrations
 from tradingagents.personas.resolver import load_packaged_persona
 from tradingagents.secretary.service import _env as secretary_templates
 
 
 def test_packaged_text_and_yaml_resources_are_readable():
-    assert "CREATE TABLE" in _schema_text()
+    assert "CREATE TABLE" in _load_migrations()[0].sql
     persona = load_packaged_persona("balanced")
     assert persona is not None
     assert persona.id == "balanced"
