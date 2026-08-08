@@ -11,15 +11,18 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable, List, Optional
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.personas.loader import Persona, load_persona_from_file
-from tradingagents.personas.resolver import personas_dir
+from tradingagents.personas.loader import Persona
+from tradingagents.personas.resolver import load_packaged_persona
 
 
 log = logging.getLogger(__name__)
 
 
 def _load_persona(persona_id: str) -> Persona:
-    return load_persona_from_file(personas_dir() / f"{persona_id}.yaml")
+    persona = load_packaged_persona(persona_id)
+    if persona is None:
+        raise FileNotFoundError(f"unknown packaged persona: {persona_id}")
+    return persona
 
 
 def _overlay_for_persona(

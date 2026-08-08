@@ -6,16 +6,13 @@ that combination falls back to cli/event_alert.j2.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Dict
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, PackageLoader, select_autoescape
 
-
-_TEMPLATE_ROOT = Path(__file__).parent / "templates"
 
 _env = Environment(
-    loader=FileSystemLoader(str(_TEMPLATE_ROOT)),
+    loader=PackageLoader("tradingagents.delivery", "templates"),
     autoescape=select_autoescape(disabled_extensions=("j2",)),
     keep_trailing_newline=True,
 )

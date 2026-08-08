@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 
 import questionary
 from dotenv import find_dotenv, set_key
@@ -463,7 +463,7 @@ def confirm_ollama_endpoint(url: str) -> None:
 
     Surfaces three things the user benefits from seeing before model
     selection: which URL we'll actually hit, where it came from
-    (\`OLLAMA_BASE_URL\` vs default), and a soft warning if the URL is
+    (`OLLAMA_BASE_URL` vs default), and a soft warning if the URL is
     missing the scheme/port that ollama-serve expects. The warning is
     advisory only — we don't reject malformed input, since the user may
     be doing something deliberately unusual (e.g. a reverse-proxy path).

@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, PackageLoader, select_autoescape
 
 from tradingagents.persistence import store
 from tradingagents.secretary.analysis_runner import (
@@ -23,9 +23,8 @@ from tradingagents.secretary.analysis_runner import (
 from tradingagents.secretary.morning import run_one_ticker
 from tradingagents.secretary.synthesis import synthesize_brief
 
-_TEMPLATE_DIR = Path(__file__).parent / "templates"
 _env = Environment(
-    loader=FileSystemLoader(str(_TEMPLATE_DIR)),
+    loader=PackageLoader("tradingagents.secretary", "templates"),
     autoescape=select_autoescape(disabled_extensions=("j2",)),
     keep_trailing_newline=True,
 )

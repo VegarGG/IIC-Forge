@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
-from pathlib import Path
+from importlib.resources import files
 
 import requests
 import yaml
@@ -30,13 +30,14 @@ _EXCHANGE_MAP = {
 }
 
 
-def _crypto_path() -> Path:
-    return Path(__file__).parent / "data" / "crypto_universe.yaml"
-
-
 def seed_crypto(conn: sqlite3.Connection) -> int:
     """Upsert all crypto entries from the static YAML. Returns row count."""
-    items = yaml.safe_load(_crypto_path().read_text())
+    yaml_text = (
+        files("tradingagents.sensing")
+        .joinpath("data", "crypto_universe.yaml")
+        .read_text(encoding="utf-8")
+    )
+    items = yaml.safe_load(yaml_text)
     n = 0
     for item in items:
         upsert_ticker(

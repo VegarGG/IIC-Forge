@@ -10,7 +10,13 @@ from __future__ import annotations
 import hashlib
 import math
 import struct
-from typing import List, Protocol
+from typing import Any, List, Protocol
+
+
+DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+# Pin the model artifact used by the production image. This prevents a mutable
+# Hugging Face branch from changing dedupe behavior between image rebuilds.
+DEFAULT_MODEL_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 
 
 class Embedder(Protocol):
@@ -50,16 +56,30 @@ class MockEmbedder:
 class SentenceTransformerEmbedder:
     """Production embedder. Model loads lazily on first .embed() call."""
 
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
+    def __init__(
+        self,
+        model_name: str = DEFAULT_MODEL_NAME,
+        *,
+        revision: str | None = None,
+    ) -> None:
         self._model_name = model_name
+        self._revision = (
+            DEFAULT_MODEL_REVISION
+            if revision is None and model_name == DEFAULT_MODEL_NAME
+            else revision
+        )
         self._model = None  # lazy
         # all-MiniLM-L6-v2 is 384-dim; this is documented and stable.
         self.dim = 384
 
-    def _ensure_loaded(self) -> None:
+    def _ensure_loaded(self) -> Any:
         if self._model is None:
             from sentence_transformers import SentenceTransformer  # heavy import
-            self._model = SentenceTransformer(self._model_name)
+            self._model = SentenceTransformer(
+                self._model_name,
+                revision=self._revision,
+            )
+        return self._model
 
     def load(self) -> None:
         """Eagerly load the model.
@@ -71,6 +91,6 @@ class SentenceTransformerEmbedder:
         self._ensure_loaded()
 
     def embed(self, text: str) -> List[float]:
-        self._ensure_loaded()
-        vec = self._model.encode(text, normalize_embeddings=True)
+        model = self._ensure_loaded()
+        vec = model.encode(text, normalize_embeddings=True)
         return vec.tolist()

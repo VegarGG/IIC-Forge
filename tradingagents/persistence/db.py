@@ -6,12 +6,11 @@ Loads sqlite-vec at connect time and registers the vec_index virtual table.
 from __future__ import annotations
 
 import sqlite3
+from importlib.resources import files
 from pathlib import Path
 from typing import Set
 
 import sqlite_vec
-
-_SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 def _split_sql_statements(script: str) -> list[str]:
@@ -48,6 +47,13 @@ def schema_tables() -> Set[str]:
     return _EXPECTED_TABLES
 
 
+def _schema_text() -> str:
+    """Read the packaged schema without assuming a source checkout exists."""
+    return files("tradingagents.persistence").joinpath("schema.sql").read_text(
+        encoding="utf-8"
+    )
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     """Open a connection, run schema.sql, load sqlite-vec, create vec_index.
 
@@ -73,8 +79,7 @@ def connect(db_path: str) -> sqlite3.Connection:
     # Schema. CREATE TABLE/INDEX IF NOT EXISTS are idempotent; ALTER TABLE
     # ADD COLUMN is NOT — sqlite raises "duplicate column name" on a re-run.
     # We split on `;` and apply each statement, suppressing only that error.
-    with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
-        script = f.read()
+    script = _schema_text()
     for stmt in _split_sql_statements(script):
         stmt = stmt.strip()
         if not stmt:

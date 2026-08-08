@@ -35,3 +35,35 @@ def test_sentence_transformer_embedder_lazy_import(monkeypatch):
     # Should construct without loading the model.
     emb = SentenceTransformerEmbedder("sentence-transformers/all-MiniLM-L6-v2")
     assert emb.dim == 384  # documented constant for that model
+
+
+@pytest.mark.unit
+def test_default_sentence_transformer_revision_is_pinned(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from tradingagents.sensing.embeddings import (
+        DEFAULT_MODEL_NAME,
+        DEFAULT_MODEL_REVISION,
+        SentenceTransformerEmbedder,
+    )
+
+    captured = {}
+
+    class _FakeSentenceTransformer:
+        def __init__(self, model_name, *, revision):
+            captured["model_name"] = model_name
+            captured["revision"] = revision
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=_FakeSentenceTransformer),
+    )
+
+    SentenceTransformerEmbedder().load()
+
+    assert captured == {
+        "model_name": DEFAULT_MODEL_NAME,
+        "revision": DEFAULT_MODEL_REVISION,
+    }

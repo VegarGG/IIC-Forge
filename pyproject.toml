@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,6 +9,7 @@ description = "IIC-FORGE: local-first investment intelligence built on TradingAg
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "httpx>=0.28.0",
     "langchain-core>=0.3.81",
     "backtrader>=1.9.78.123",
     "langchain-anthropic>=0.3.15",
@@ -20,6 +21,9 @@ dependencies = [
     "jinja2>=3.1.0",
     "pandas>=2.3.0",
     "parsel>=1.10.0",
+    "pydantic>=2.10.0",
+    "python-dateutil>=2.9.0",
+    "python-dotenv>=1.0.0",
     "pytz>=2025.2",
     "pyyaml>=6.0",
     "questionary>=2.1.0",
@@ -27,7 +31,6 @@ dependencies = [
     "requests>=2.32.4",
     "rich>=14.0.0",
     "typer>=0.21.0",
-    "setuptools>=80.9.0",
     "sqlite-vec>=0.1.6",
     "stockstats>=0.6.5",
     "tqdm>=4.67.1",
@@ -41,6 +44,7 @@ dependencies = [
     "python-telegram-bot>=20.0,<22.0",
     "streamlit>=1.30,<2.0",
     "altair>=5.0",
+    "openai>=1.86.0",
 ]
 
 [project.optional-dependencies]
@@ -56,10 +60,23 @@ sensing = [
     "tweepy>=4.14",                    # F3 x adapter
     "feedparser>=6.0",                 # F3 rss adapter
     "sentence-transformers>=2.5",      # 384-dim local embedder; matches vec_index schema
+    "torch>=2.5,<3",
+]
+# Exact connector set approved for the private single-operator deployment.
+production = [
+    "feedparser>=6.0",
+    "sentence-transformers>=2.5",
+    "telethon>=1.36",
+    "torch>=2.5,<3",
 ]
 dev = [
+    "build>=1.2",
     "fakeredis>=2.20",                 # async-compatible Redis fake for unit tests
+    "mypy>=1.11",
+    "pytest>=8.0",
     "pytest-asyncio>=0.23",            # async test support (declared with asyncio_mode=auto below)
+    "ruff>=0.6",
+    "types-python-dateutil>=2.9",
     "freezegun>=1.4",                  # F4: deterministic time control for cooldown tests
 ]
 
@@ -71,7 +88,24 @@ tradingagents = "cli.main:app"
 include = ["tradingagents*", "cli*"]
 
 [tool.setuptools.package-data]
-cli = ["static/*"]
+cli = ["static/*.txt"]
+"tradingagents.delivery" = [
+    "templates/cli/*.j2",
+    "templates/email/*.j2",
+    "templates/telegram/*.j2",
+]
+"tradingagents.persistence" = ["*.sql"]
+"tradingagents.personas" = ["*.yaml"]
+"tradingagents.secretary" = ["templates/*.j2"]
+"tradingagents.sensing" = ["data/*.yaml"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
