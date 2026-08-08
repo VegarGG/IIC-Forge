@@ -112,7 +112,7 @@ def test_compose_event_alert_writes_brief(setup, monkeypatch):
 
 
 @pytest.mark.unit
-def test_compose_event_alert_delivers_full_brief_when_enabled(setup, monkeypatch):
+def test_compose_event_alert_queues_full_brief_when_enabled(setup, monkeypatch):
     conn, data_dir, job_id = setup
     monkeypatch.setattr(
         "tradingagents.secretary.service.run_default_analysis",
@@ -127,14 +127,6 @@ def test_compose_event_alert_delivers_full_brief_when_enabled(setup, monkeypatch
         },
     )
 
-    sent = []
-    fake_channel = MagicMock()
-    fake_channel.send.side_effect = lambda **kw: sent.append(kw) or 1
-    monkeypatch.setattr(
-        "tradingagents.secretary.service._build_channel",
-        lambda name, conn, config: fake_channel,
-    )
-
     sec = Secretary(conn=conn, data_dir=data_dir, llm=MagicMock())
     brief_id = sec.compose_event_alert(
         event_id="ev1",
@@ -144,9 +136,15 @@ def test_compose_event_alert_delivers_full_brief_when_enabled(setup, monkeypatch
     )
 
     assert brief_id
-    assert sent
-    assert {call["mode"] for call in sent} == {"event_alert"}
-    assert all(call["brief"]["brief_id"] == brief_id for call in sent)
+    rows = conn.execute(
+        "SELECT brief_id, channel, mode, state FROM delivery_queue "
+        "ORDER BY channel"
+    ).fetchall()
+    assert [(r["channel"], r["mode"], r["state"]) for r in rows] == [
+        ("email", "event_alert", "queued"),
+        ("telegram", "event_alert", "queued"),
+    ]
+    assert all(r["brief_id"] == brief_id for r in rows)
 
 
 @pytest.mark.unit
@@ -163,4 +161,39 @@ def test_compose_event_alert_returns_brief_id_string(setup, monkeypatch):
     sec = Secretary(conn=conn, data_dir=data_dir, llm=MagicMock())
     brief_id = sec.compose_event_alert(event_id="ev1", ticker="AAPL", job_id=job_id)
     assert isinstance(brief_id, str)
-    assert len(brief_id) == 32   # uuid4 hex
+    assert len(brief_id) == 32   # deterministic UUID hex
+
+
+@pytest.mark.unit
+def test_compose_event_alert_retry_reuses_brief_and_outbox(setup, monkeypatch):
+    conn, data_dir, job_id = setup
+    runner = MagicMock(return_value=["r1", "r2", "r3"])
+    synth = MagicMock(return_value={
+        "consensus": "Beat is real.",
+        "divergence": "Macro neutral; value+momentum BUY.",
+        "recommendation": "BUY (high confidence)",
+    })
+    monkeypatch.setattr(
+        "tradingagents.secretary.service.run_default_analysis", runner,
+    )
+    monkeypatch.setattr(
+        "tradingagents.secretary.service.synthesize_brief", synth,
+    )
+    sec = Secretary(conn=conn, data_dir=data_dir, llm=MagicMock())
+
+    first = sec.compose_event_alert(
+        event_id="ev1", ticker="AAPL", job_id=job_id, deliver=True,
+    )
+    second = sec.compose_event_alert(
+        event_id="ev1", ticker="AAPL", job_id=job_id, deliver=True,
+    )
+
+    assert second == first
+    assert runner.call_count == 1
+    assert synth.call_count == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM briefs WHERE brief_id = ?", (first,)
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM delivery_queue WHERE brief_id = ?", (first,)
+    ).fetchone()[0] == 2

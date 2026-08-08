@@ -27,8 +27,11 @@ def test_telegram_outbound_sends_with_inline_keyboard_for_event_alert(tmp_path):
     with patch("tradingagents.delivery.telegram._get_bot", return_value=fake_bot), \
          patch.dict("os.environ", {"IIC_TELEGRAM_BOT_TOKEN": "tok"}):
         ch = TelegramOutbound(conn=conn, config=cfg)
-        delivery_id = ch.send(brief={"brief_id": "b1", "mode": "event_alert"},
-                              mode="event_alert", body="ALERT TEXT")
+        delivery_id = ch.send_attempt(
+            brief={"brief_id": "b1", "mode": "event_alert"},
+            mode="event_alert",
+            body="ALERT TEXT",
+        )
     args, kwargs = fake_bot.send_message.call_args
     assert kwargs["chat_id"] == 12345
     assert "ALERT TEXT" in kwargs["text"]
@@ -87,8 +90,11 @@ def test_telegram_outbound_disabled_records_skipped(tmp_path):
                          "poll_interval_seconds": 1},
     }
     ch = TelegramOutbound(conn=conn, config=cfg)
-    delivery_id = ch.send(brief={"brief_id": "b1", "mode": "event_alert"},
-                          mode="event_alert", body="...")
+    delivery_id = ch.send_attempt(
+        brief={"brief_id": "b1", "mode": "event_alert"},
+        mode="event_alert",
+        body="...",
+    )
     row = conn.execute(
         "SELECT status, skip_reason FROM deliveries WHERE delivery_id = ?",
         (delivery_id,),

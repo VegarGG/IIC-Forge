@@ -48,6 +48,9 @@ def drain_one(
     *,
     secretary,
     budget_guard: Optional[DailyBudgetGuard] = None,
+    lease_seconds: int = 1500,
+    retry_base_seconds: int = 30,
+    retry_cap_seconds: int = 900,
 ) -> bool:
     """Lease + dispatch + mark exactly one job. Returns True if a job ran.
 
@@ -58,7 +61,7 @@ def drain_one(
     if budget_guard is not None and not budget_guard.gate(conn):
         return False
 
-    job = queue_store.lease_one(conn)
+    job = queue_store.lease_one(conn, lease_seconds=lease_seconds)
     if job is None:
         return False
 
@@ -70,14 +73,34 @@ def drain_one(
             run_ids=result["run_ids"],
             brief_id=result["brief_id"],
             cost_usd=result["cost_usd"],
+            lease_token=job["lease_token"],
         )
         log.info("job %d done (brief=%s cost=$%.4f)",
                  job["job_id"], result["brief_id"], result["cost_usd"])
-    except Exception as exc:
-        queue_store.mark_error(
-            conn, job_id=job["job_id"], error_msg=str(exc),
+    except queue_store.QueueLeaseLost:
+        log.warning(
+            "job %d finished after its lease was replaced; result was fenced",
+            job["job_id"],
         )
-        log.exception("job %d failed", job["job_id"])
+    except Exception as exc:
+        try:
+            state = queue_store.mark_failure(
+                conn,
+                job_id=job["job_id"],
+                error_msg=f"{type(exc).__name__}: {exc}",
+                lease_token=job["lease_token"],
+                retry_base_seconds=retry_base_seconds,
+                retry_cap_seconds=retry_cap_seconds,
+            )
+        except queue_store.QueueLeaseLost:
+            log.warning(
+                "job %d failed after its lease was replaced; failure was fenced",
+                job["job_id"],
+            )
+        else:
+            log.exception("job %d failed; state=%s attempt=%d/%d",
+                          job["job_id"], state, job["attempt_count"],
+                          job["max_attempts"])
     return True
 
 
@@ -148,18 +171,20 @@ def main(config: Optional[dict] = None) -> None:
     conn = connect(cfg["iic_db_path"])
     swept = boot_sweep(conn, max_age_seconds=3600)
     if swept:
-        log.warning("boot sweep marked %d stale lease(s) as error", swept)
+        log.warning("boot sweep recovered %d stale lease(s)", swept)
 
     budget = DailyBudgetGuard(
         enabled=cfg["daily_budget_enabled"],
         daily_usd=cfg["daily_budget_usd"],
     )
     job_timeout = cfg["worker_job_timeout_min"] * 60
+    lease_seconds = job_timeout + int(cfg["queue_lease_margin_seconds"])
 
     # Stale-lease reclamation must run INSIDE the loop, not only at boot
     # (R-F4-2 / S-4). A job whose lease went stale — because the worker died
     # OR because the job blew past its wall-clock cap and its future was
-    # abandoned — is recovered to 'error' here without ever needing a restart.
+    # abandoned — is recovered here without ever needing a restart. It is
+    # re-queued while attempts remain and becomes terminal only at exhaustion.
     # max_age must comfortably exceed the per-job timeout so we never reclaim
     # a job that is still legitimately running; we add a margin on top.
     sweep_max_age = max(job_timeout * 2, job_timeout + 300)
@@ -181,7 +206,12 @@ def main(config: Optional[dict] = None) -> None:
             tls.conn = connect(cfg["iic_db_path"])
             tls.secretary = _build_secretary(cfg, tls.conn)
         return drain_one(
-            tls.conn, secretary=tls.secretary, budget_guard=budget,
+            tls.conn,
+            secretary=tls.secretary,
+            budget_guard=budget,
+            lease_seconds=lease_seconds,
+            retry_base_seconds=int(cfg["queue_retry_base_seconds"]),
+            retry_cap_seconds=int(cfg["queue_retry_cap_seconds"]),
         )
 
     # Single-slot executor (max_concurrent_jobs is 1). On a per-job timeout we
@@ -210,8 +240,7 @@ def main(config: Optional[dict] = None) -> None:
                     )
                     if n:
                         log.warning(
-                            "in-loop sweep reclaimed %d stale lease(s) "
-                            "to 'error'", n,
+                            "in-loop sweep recovered %d stale lease(s)", n,
                         )
                 except Exception:
                     log.exception("in-loop stale-lease sweep failed")
@@ -233,7 +262,7 @@ def main(config: Optional[dict] = None) -> None:
                     log.error("job timed out after %ds; abandoning the "
                               "in-flight run (cannot abort LangGraph) and "
                               "replacing the worker thread — stale-lease sweep "
-                              "will mark it 'error' without a restart",
+                              "will recover it without a restart",
                               job_timeout)
                     ex.shutdown(wait=False, cancel_futures=True)
                     ex = ThreadPoolExecutor(

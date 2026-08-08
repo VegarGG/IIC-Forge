@@ -1,8 +1,9 @@
 """DeliveryChannel base class.
 
 Every channel inherits from DeliveryChannel and implements ``_send_impl``.
-The base ``send()`` handles:
-  - quiet-hours gating (event_alert and event_alert_light)
+The base ``send()`` routes every event alert into the durable outbox. The
+delivery worker calls ``send_attempt()`` which handles:
+  - a final quiet-hours check
   - writing the deliveries row on success / failure / skip
   - returning the delivery_id
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 import sqlite3
 from abc import ABC, abstractmethod
 from datetime import datetime, time, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from tradingagents.delivery.quiet_hours import is_quiet_hours
 from tradingagents.persistence import store
@@ -35,12 +36,11 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _local_now() -> time:
-    """Local-time *time* (no date) used for quiet-hours comparison.
+def _local_now(timezone_name: str = "Asia/Shanghai") -> time:
+    """Configured-zone local time used for quiet-hours comparison."""
+    from zoneinfo import ZoneInfo
 
-    Pulled out so tests can patch it. Local TZ comes from the OS — for the
-    F5 single-machine use case this is correct."""
-    return datetime.now().time()
+    return datetime.now(ZoneInfo(timezone_name)).time().replace(tzinfo=None)
 
 
 class DeliveryChannel(ABC):
@@ -55,8 +55,31 @@ class DeliveryChannel(ABC):
         """Return (channel_ref, error_msg). Raise on failure."""
 
     def send(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
+        if mode in _QUIET_HOUR_MODES:
+            from tradingagents.delivery import queue_store
+
+            return queue_store.enqueue_alert(
+                self._conn,
+                brief_id=brief["brief_id"],
+                channel=self.channel_name,
+                mode=mode,
+                brief_payload=brief,
+                body=body,
+                quiet_hours=self._config["delivery"]["quiet_hours"],
+                max_attempts=int(
+                    self._config["delivery"].get("queue_max_attempts", 5)
+                ),
+            )
+        return self.send_attempt(brief=brief, mode=mode, body=body)
+
+    def send_attempt(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
+        """Attempt transport now and append one immutable delivery audit row."""
         if mode in _QUIET_HOUR_MODES and is_quiet_hours(
-            local_time=_local_now(),
+            local_time=_local_now(
+                self._config["delivery"]["quiet_hours"].get(
+                    "timezone", "Asia/Shanghai"
+                )
+            ),
             config=self._config["delivery"]["quiet_hours"],
         ):
             return store.insert_delivery(

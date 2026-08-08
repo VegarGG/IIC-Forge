@@ -18,6 +18,7 @@ from typing import Any, Callable
 import json
 
 from tradingagents.persistence import store
+from tradingagents.orchestrator import queue_store
 from tradingagents.secretary.refinement import classify_and_extract
 from tradingagents.secretary.service import RefinementDepthExceeded
 
@@ -172,26 +173,25 @@ def _dispatch_one(
                 ),
             )
             return
+        payload = json.dumps({
+            "event_id": event_id,
+            "ticker": ticker,
+            "action_id": row["action_id"],
+            "parent_brief_id": row["brief_id"],
+        })
         with conn:
-            cur = conn.execute(
-                "INSERT INTO queue_jobs (job_type, payload, state, "
-                "enqueued_ts, trigger_event_id) VALUES (?, ?, 'queued', "
-                "datetime('now'), ?)",
-                ("event_alert",
-                 json.dumps({
-                     "event_id": event_id,
-                     "ticker": ticker,
-                     "action_id": row["action_id"],
-                     "parent_brief_id": row["brief_id"],
-                 }),
-                 event_id),
+            job_id = queue_store.insert_queue_job(
+                conn,
+                job_type="event_alert",
+                payload=payload,
+                trigger_event_id=event_id,
+                idempotency_key=f"run_full_study:{row['action_id']}",
+                commit=False,
             )
-            job_id = cur.lastrowid
-        store.mark_action_dispatched(
-            conn,
-            action_id=row["action_id"],
-            result_job_id=job_id,
-            dispatched_ts=datetime.now(timezone.utc).isoformat(),
-        )
+            conn.execute(
+                "UPDATE brief_actions SET result_job_id = ?, dispatched_ts = ? "
+                "WHERE action_id = ? AND result_job_id IS NULL",
+                (job_id, datetime.now(timezone.utc).isoformat(), row["action_id"]),
+            )
     else:
         log.warning("action_handler: unknown action_type %r", row["action_type"])

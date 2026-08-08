@@ -61,6 +61,8 @@ def _apply_nested_env_overrides(config: dict) -> dict:
       override for the triage_salience role. Cutover = pure env flip.
     - IIC_ALERT_GATE_LLM_PROVIDER / IIC_ALERT_GATE_LLM_MODEL: per-role LLM
       routing override for the alert_gate role.
+    - IIC_SMTP_*: enable and configure the SMTP delivery transport without
+      committing operator addresses or deployment-specific server settings.
     NOTE: LOCAL_LLM_BASE_URL is consumed directly at request time in
     openai_client._resolve_provider_base_url (Task 1). default_config does not
     mirror it because the file's idiom only mirrors config-driven values, not
@@ -91,6 +93,23 @@ def _apply_nested_env_overrides(config: dict) -> dict:
         val = os.environ.get(env_var)
         if val is not None and val.strip() != "":
             config.setdefault("llm_roles", {}).setdefault(role, {})[field] = val
+
+    smtp_cfg = config.setdefault("smtp", {})
+    _smtp_env_map = [
+        ("IIC_SMTP_ENABLED", "enabled"),
+        ("IIC_SMTP_HOST", "host"),
+        ("IIC_SMTP_PORT", "port"),
+        ("IIC_SMTP_FROM_ADDR", "from_addr"),
+    ]
+    for env_var, field in _smtp_env_map:
+        val = os.environ.get(env_var)
+        if val is not None and val.strip() != "":
+            smtp_cfg[field] = _coerce(val, smtp_cfg.get(field))
+    smtp_to = os.environ.get("IIC_SMTP_TO_ADDRS")
+    if smtp_to is not None and smtp_to.strip() != "":
+        smtp_cfg["to_addrs"] = [
+            address.strip() for address in smtp_to.split(",") if address.strip()
+        ]
 
     return config
 
@@ -147,6 +166,9 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     "worker_poll_interval_s": 2,
     "worker_job_timeout_min": 20,
     "max_concurrent_jobs": 1,
+    "queue_retry_base_seconds": 30,
+    "queue_retry_cap_seconds": 900,
+    "queue_lease_margin_seconds": 300,
     # Cost guards (program-spec Appendix A: enabled=False during F0–F5)
     "trigger_backpressure_enabled": False,
     "trigger_backpressure_max_pending": 20,
@@ -255,12 +277,18 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     # F5 — Delivery + operations
     # ============================================================
     "delivery": {
-        "enabled_channels": ["email", "cli"],
+        "enabled_channels": ["telegram", "email"],
         "quiet_hours": {
             "enabled": True,
             "start": "22:00",
             "end": "07:00",
+            "timezone": "Asia/Shanghai",
         },
+        "queue_max_attempts": 5,
+        "queue_retry_base_seconds": 30,
+        "queue_retry_cap_seconds": 1800,
+        "queue_lease_seconds": 120,
+        "worker_poll_interval_s": 2,
         "digest_modes": {
             "telegram": "terse",
             "email": "full",

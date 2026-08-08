@@ -44,8 +44,7 @@ def test_compose_light_creates_brief_actions_and_suppression(tmp_path):
 
 
 @pytest.mark.unit
-def test_compose_light_delivers_to_channels_when_enabled(tmp_path, monkeypatch):
-    from tradingagents.secretary import service as svc
+def test_compose_light_queues_enabled_channels(tmp_path):
     from tradingagents.secretary.service import Secretary
     conn = connect(str(tmp_path / "iic.db"))
     _seed_event(conn)
@@ -53,13 +52,46 @@ def test_compose_light_delivers_to_channels_when_enabled(tmp_path, monkeypatch):
     llm.invoke.return_value = MagicMock(content="summary")
     sec = Secretary(conn=conn, data_dir=str(tmp_path / "data"), llm=llm)
 
-    sent = []
-    fake_channel = MagicMock()
-    fake_channel.send.side_effect = lambda **kw: sent.append(kw["mode"]) or 1
-    monkeypatch.setattr(svc, "_build_channel",
-                        lambda name, conn, config: fake_channel)
-
     sec.compose_event_alert_light(event_id="ev1", tickers=["NVDA"],
                                   ttl_hours=24, deliver=True)
-    # at least one channel.send happened, in event_alert_light mode
-    assert "event_alert_light" in sent
+    rows = conn.execute(
+        "SELECT channel, mode, state FROM delivery_queue ORDER BY channel"
+    ).fetchall()
+    assert [(r["channel"], r["mode"], r["state"]) for r in rows] == [
+        ("email", "event_alert_light", "queued"),
+        ("telegram", "event_alert_light", "queued"),
+    ]
+
+
+@pytest.mark.unit
+def test_light_alert_bundle_rolls_back_if_outbox_enqueue_fails(
+    tmp_path, monkeypatch
+):
+    from tradingagents.delivery import queue_store
+    from tradingagents.secretary.service import Secretary
+
+    conn = connect(str(tmp_path / "iic.db"))
+    _seed_event(conn)
+    llm = MagicMock()
+    llm.invoke.return_value = MagicMock(content="summary")
+    sec = Secretary(conn=conn, data_dir=str(tmp_path / "data"), llm=llm)
+    original = queue_store.enqueue_alert
+    calls = 0
+
+    def _fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("forced outbox failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(queue_store, "enqueue_alert", _fail_second)
+    with pytest.raises(RuntimeError, match="forced outbox failure"):
+        sec.compose_event_alert_light(
+            event_id="ev1", tickers=["NVDA"], ttl_hours=24, deliver=True
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM briefs").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM brief_actions").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM suppression").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM delivery_queue").fetchone()[0] == 0

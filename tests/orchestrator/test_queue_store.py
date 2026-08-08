@@ -113,7 +113,7 @@ def test_daily_cost_total_sums_done_jobs(conn):
 
 
 @pytest.mark.unit
-def test_sweep_stale_leases_marks_old_running_as_error(conn):
+def test_sweep_stale_leases_requeues_old_running_job(conn):
     from tradingagents.orchestrator.queue_store import (
         insert_queue_job, lease_one, sweep_stale_leases,
     )
@@ -128,5 +128,5 @@ def test_sweep_stale_leases_marks_old_running_as_error(conn):
     n = sweep_stale_leases(conn, max_age_seconds=3600)
     assert n == 1
     row = conn.execute("SELECT * FROM queue_jobs WHERE job_id=?", (job["job_id"],)).fetchone()
-    assert row["state"] == "error"
+    assert row["state"] == "queued"
     assert "stale_lease" in row["error"]

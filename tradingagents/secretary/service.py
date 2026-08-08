@@ -12,10 +12,12 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 from tradingagents.persistence import store
+from tradingagents.delivery.factory import build_channel
 from tradingagents.secretary.analysis_runner import (
     run_committee_analysis,
     run_default_analysis,
@@ -61,16 +63,8 @@ def render_event_alert(
 
 
 def _build_channel(name, conn, config):
-    if name == "cli":
-        from tradingagents.delivery.cli import CLIOutbound
-        return CLIOutbound(conn=conn, config=config)
-    if name == "email":
-        from tradingagents.delivery.email import EmailOutbound
-        return EmailOutbound(conn=conn, config=config)
-    if name == "telegram":
-        from tradingagents.delivery.telegram import TelegramOutbound
-        return TelegramOutbound(conn=conn, config=config)
-    return None
+    """Compatibility seam retained for tests and downstream monkeypatches."""
+    return build_channel(name, conn, config)
 
 
 class RefinementDepthExceeded(Exception):
@@ -185,6 +179,26 @@ class Secretary:
         if ev is None:
             raise ValueError(f"compose_event_alert: event {event_id} not found")
 
+        # Queue retries must not create a second brief or a second set of
+        # outbound channel intents after the first attempt committed its
+        # durable side effects but crashed before acknowledging the job.
+        # Deriving the identity from the immutable queue job makes the whole
+        # composition idempotent across process restarts.
+        brief_id = uuid.uuid5(
+            uuid.NAMESPACE_URL, f"iic-forge:event-alert:{job_id}"
+        ).hex
+        existing = store.get_brief(self._conn, brief_id=brief_id)
+        if existing is not None:
+            if (
+                existing["mode"] != "event_alert"
+                or existing["scope"] != ticker
+                or existing["trigger_event_id"] != event_id
+            ):
+                raise RuntimeError(
+                    f"queue job {job_id} is linked to an incompatible brief"
+                )
+            return brief_id
+
         # Read the raw payload off disk — F3 wrote it to events/<event_id>.json.
         raw_text = ""
         if ev["raw_path"]:
@@ -259,21 +273,13 @@ class Secretary:
             persona_runs=persona_runs,
         )
 
-        brief_id = uuid.uuid4().hex
         rel_path = f"briefs/{brief_id}.md"
         (self._data_dir / "briefs").mkdir(parents=True, exist_ok=True)
         (self._data_dir / rel_path).write_text(markdown, encoding="utf-8")
 
-        generated_ts = datetime.now(timezone.utc).isoformat()
-        store.insert_brief(
-            self._conn,
-            brief_id=brief_id, mode="event_alert", scope=ticker,
-            generated_ts=generated_ts,
-            content_path=rel_path,
-            run_ids=[r["run_id"] for r in persona_runs],
-            parent_brief_id=parent_brief_id,
-            trigger_event_id=event_id,
-        )
+        # Build the analysis pack before publishing the brief/outbox
+        # transaction. Once an alert becomes deliverable, its brief always
+        # points to a complete analysis pack.
         from tradingagents.analysis_pack.builder import build_pack_content_from_runs
         from tradingagents.analysis_pack.store import create_analysis_pack
 
@@ -295,19 +301,32 @@ class Secretary:
             source_run_ids=run_ids,
             content=pack_content,
         )
-        store.update_brief_analysis_pack(
-            self._conn,
-            brief_id=brief_id,
-            analysis_pack_id=pack_id,
-        )
-        if deliver:
-            self._deliver_event_alert(
-                brief_id=brief_id,
-                ticker=ticker,
+
+        generated_ts = datetime.now(timezone.utc).isoformat()
+        with self._conn:
+            store.insert_brief(
+                self._conn,
+                brief_id=brief_id, mode="event_alert", scope=ticker,
                 generated_ts=generated_ts,
-                raw_text=raw_text,
-                synthesis=synthesis,
+                content_path=rel_path,
+                run_ids=[r["run_id"] for r in persona_runs],
+                parent_brief_id=parent_brief_id,
+                trigger_event_id=event_id,
+                commit=False,
             )
+            self._conn.execute(
+                "UPDATE briefs SET analysis_pack_id = ? WHERE brief_id = ?",
+                (pack_id, brief_id),
+            )
+            if deliver:
+                self._deliver_event_alert(
+                    brief_id=brief_id,
+                    ticker=ticker,
+                    generated_ts=generated_ts,
+                    raw_text=raw_text,
+                    synthesis=synthesis,
+                    commit=False,
+                )
         return brief_id
 
     def compose_event_alert_light(
@@ -352,52 +371,58 @@ class Secretary:
         (self._data_dir / "briefs").mkdir(parents=True, exist_ok=True)
         (self._data_dir / rel_path).write_text(body, encoding="utf-8")
 
-        store.insert_brief(
-            self._conn,
-            brief_id=brief_id,
-            mode="event_alert_light",
-            scope=json.dumps(list(tickers)),
-            generated_ts=now.isoformat(),
-            content_path=rel_path,
-            run_ids=[],
-            parent_brief_id=None,
-            trigger_event_id=event_id,
-        )
-
-        # NOTE: insert_brief + the per-ticker actions/suppressions are written
-        # via store.* helpers that each commit individually, so this is not one
-        # atomic unit. A mid-loop crash can leave some tickers without an action
-        # /suppression. Acceptable for V1 (brief_id is only returned on full
-        # success; partial state is a UX nuisance, not corruption). A truly
-        # atomic version would need non-committing store variants.
         expires_at = (now + timedelta(hours=ttl_hours)).isoformat()
-        # Same-day dedup: suppress each ticker until the next LOCAL midnight.
-        # Use the machine's local tz explicitly (astimezone() with no arg binds
-        # the naive 'now' to local time) so this is unambiguous on UTC servers
-        # and TZ-offset dev boxes alike.
-        local_now = datetime.now().astimezone()
+        # Same-day dedup follows the operator clock, independent of Docker host
+        # timezone, and therefore resets at Beijing midnight.
+        local_now = now.astimezone(ZoneInfo("Asia/Shanghai"))
         next_local_midnight = (local_now + timedelta(days=1)).replace(
             hour=0, minute=0, second=0, microsecond=0)
         until_ts = next_local_midnight.astimezone(timezone.utc).isoformat()
-        for t in tickers:
-            store.insert_brief_action(
-                self._conn, brief_id=brief_id, action_type="run_full_study",
-                action_params={"ticker": t}, expires_at=expires_at,
+        # Brief, approval actions, suppression, and channel outbox intents are
+        # one SQLite commit. A crash cannot suppress an alert without also
+        # persisting every enabled delivery intent.
+        with self._conn:
+            store.insert_brief(
+                self._conn,
+                brief_id=brief_id,
+                mode="event_alert_light",
+                scope=json.dumps(list(tickers)),
+                generated_ts=now.isoformat(),
+                content_path=rel_path,
+                run_ids=[],
+                parent_brief_id=None,
+                trigger_event_id=event_id,
+                commit=False,
             )
-            store.upsert_suppression(
-                self._conn, key=f"event_alert:{t}", until_ts=until_ts,
-                reason=f"light_alert_same_day event_id={event_id}",
-                created_by="secretary",
-            )
-
-        if deliver:
-            self._deliver_light_alert(brief_id, tickers, summary, ev)
+            for t in tickers:
+                store.insert_brief_action(
+                    self._conn,
+                    brief_id=brief_id,
+                    action_type="run_full_study",
+                    action_params={"ticker": t},
+                    expires_at=expires_at,
+                    commit=False,
+                )
+                store.upsert_suppression(
+                    self._conn,
+                    key=f"event_alert:{t}",
+                    until_ts=until_ts,
+                    reason=f"light_alert_same_day event_id={event_id}",
+                    created_by="secretary",
+                    commit=False,
+                )
+            if deliver:
+                self._deliver_light_alert(
+                    brief_id, tickers, summary, ev, commit=False
+                )
         return brief_id
 
-    def _deliver_light_alert(self, brief_id, tickers, summary, ev) -> None:
-        """Best-effort fan-out to enabled channels. Delivery failures are
-        recorded as deliveries rows by each channel; never raise here."""
+    def _deliver_light_alert(
+        self, brief_id, tickers, summary, ev, *, commit: bool = True
+    ) -> None:
+        """Persist one durable outbox row per enabled alert channel."""
         from tradingagents.default_config import DEFAULT_CONFIG
+        from tradingagents.delivery import queue_store as delivery_queue
         from tradingagents.delivery.render import render_for_channel
         config = dict(DEFAULT_CONFIG)
         brief = {
@@ -408,24 +433,31 @@ class Secretary:
         names = list(config["delivery"]["enabled_channels"])
         if config["telegram_bot"]["enabled"] and "telegram" not in names:
             names.append("telegram")
-        for name in names:
-            try:
-                ch = _build_channel(name, self._conn, config)
-                if ch is None:
-                    continue
-                body = render_for_channel(
-                    channel=name, mode="event_alert_light", brief=brief)
-                ch.send(brief=brief, mode="event_alert_light", body=body)
-            except Exception as exc:  # noqa: BLE001
-                store.insert_delivery(
+        rendered = {
+            name: render_for_channel(
+                channel=name, mode="event_alert_light", brief=brief
+            )
+            for name in names
+        }
+
+        def _enqueue() -> None:
+            for name, body in rendered.items():
+                delivery_queue.enqueue_alert(
                     self._conn,
                     brief_id=brief_id,
                     channel=name,
-                    status="failed",
-                    sent_ts=None,
-                    channel_ref=str(exc)[:500],
-                    skip_reason=None,
+                    mode="event_alert_light",
+                    brief_payload=brief,
+                    body=body,
+                    quiet_hours=config["delivery"]["quiet_hours"],
+                    max_attempts=int(config["delivery"]["queue_max_attempts"]),
+                    commit=False,
                 )
+        if commit:
+            with self._conn:
+                _enqueue()
+        else:
+            _enqueue()
 
     def _deliver_deep_dive(
         self,
@@ -483,9 +515,11 @@ class Secretary:
         generated_ts: str,
         raw_text: str,
         synthesis: Dict[str, str],
+        commit: bool = True,
     ) -> None:
-        """Best-effort fan-out for approved full event-alert briefs."""
+        """Persist one durable outbox row per enabled alert channel."""
         from tradingagents.default_config import DEFAULT_CONFIG
+        from tradingagents.delivery import queue_store as delivery_queue
         from tradingagents.delivery.render import render_for_channel
         config = dict(DEFAULT_CONFIG)
         brief = {
@@ -506,24 +540,29 @@ class Secretary:
         names = list(config["delivery"]["enabled_channels"])
         if config["telegram_bot"]["enabled"] and "telegram" not in names:
             names.append("telegram")
-        for name in names:
-            try:
-                ch = _build_channel(name, self._conn, config)
-                if ch is None:
-                    continue
-                body = render_for_channel(
-                    channel=name, mode="event_alert", brief=brief)
-                ch.send(brief=brief, mode="event_alert", body=body)
-            except Exception as exc:  # noqa: BLE001
-                store.insert_delivery(
+        rendered = {
+            name: render_for_channel(channel=name, mode="event_alert", brief=brief)
+            for name in names
+        }
+
+        def _enqueue() -> None:
+            for name, body in rendered.items():
+                delivery_queue.enqueue_alert(
                     self._conn,
                     brief_id=brief_id,
                     channel=name,
-                    status="failed",
-                    sent_ts=None,
-                    channel_ref=str(exc)[:500],
-                    skip_reason=None,
+                    mode="event_alert",
+                    brief_payload=brief,
+                    body=body,
+                    quiet_hours=config["delivery"]["quiet_hours"],
+                    max_attempts=int(config["delivery"]["queue_max_attempts"]),
+                    commit=False,
                 )
+        if commit:
+            with self._conn:
+                _enqueue()
+        else:
+            _enqueue()
 
     # ----- F5: morning digest -----
     def compose_morning_digest(

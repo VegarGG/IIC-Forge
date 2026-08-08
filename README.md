@@ -184,7 +184,13 @@ tradingagents forge sense sweep-watchlist      # TTL prune
 
 # Orchestrator
 tradingagents forge orchestrator status        # queue + recent jobs
+tradingagents forge orchestrator retry <job-id> # one additional terminal-job attempt
 python scripts/f4_f5_exit_gate.py --since 2026-06-03T09:00:00Z --window-hours 12
+
+# Durable alert delivery
+tradingagents forge delivery worker             # foreground outbox worker
+tradingagents forge delivery status             # queued/running/sent/dead intents
+tradingagents forge delivery retry <delivery-job-id>
 
 # Event-alert approval gate
 tradingagents forge alert list                 # pending light alerts
@@ -215,6 +221,9 @@ secrets go in `.env` (never committed). Key variables:
 | `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` / `TELEGRAM_SENSING_SESSION` | Telegram sensing adapter |
 | `TELEGRAM_SENSING_CHANNELS` | comma-separated channel usernames to ingest (the session account must **join** them) |
 | `IIC_TELEGRAM_BOT_TOKEN` / `TELEGRAM_BOT_ALLOWED_CHAT_IDS` | delivery/approval bot token + allowed chat id(s) |
+| `IIC_SMTP_ENABLED` / `IIC_SMTP_HOST` / `IIC_SMTP_PORT` | enable and configure email delivery transport |
+| `IIC_SMTP_USER` / `IIC_SMTP_APP_PASSWORD` | SMTP login credentials |
+| `IIC_SMTP_FROM_ADDR` / `IIC_SMTP_TO_ADDRS` | sender and comma-separated private recipients |
 | `TRADINGAGENTS_IIC_DB_PATH` | SQLite path (default `~/.tradingagents/iic.db`) |
 
 Notable tunables in `default_config.py`:
@@ -224,6 +233,8 @@ Notable tunables in `default_config.py`:
 | `alert_approval_gate_enabled` | `True` | light-alert → approve → study (vs. legacy auto-enqueue) |
 | `alert_salience_threshold` / `alert_ticker_confidence_threshold` | `0.85` / `0.9` | how selective the alert trigger is |
 | `alert_pending_ttl_hours` | `24` | how long a pending approval stays valid |
+| `delivery.quiet_hours.timezone` | `Asia/Shanghai` | alert quiet-hours clock (22:00-07:00) |
+| `delivery.queue_max_attempts` | `5` | bounded Telegram/email attempts before `dead` |
 | `market_data_stale_after_seconds` | `900` | snapshot freshness TTL for same-day market data |
 | `market_data_cache_ttl_seconds` | `900` | same-day OHLCV cache TTL; historical cache files are reused |
 | cost / rate guards | `enabled=False` | coded but off through F0–F5 (measure first) |

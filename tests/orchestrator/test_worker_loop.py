@@ -1,7 +1,6 @@
 import json
 import threading
 import pytest
-from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -61,7 +60,7 @@ def test_drain_one_returns_false_when_queue_empty(setup):
 
 
 @pytest.mark.unit
-def test_drain_one_marks_error_on_failure(setup):
+def test_drain_one_schedules_retry_on_failure(setup):
     from tradingagents.orchestrator.worker import drain_one
     conn, data_dir = setup
     sec = MagicMock()
@@ -74,7 +73,9 @@ def test_drain_one_marks_error_on_failure(setup):
     row = conn.execute(
         "SELECT * FROM queue_jobs WHERE trigger_event_id='ev1'"
     ).fetchone()
-    assert row["state"] == "error"
+    assert row["state"] == "queued"
+    assert row["attempt_count"] == 1
+    assert row["available_ts"] > row["started_ts"]
     assert "LLM died" in row["error"]
 
 

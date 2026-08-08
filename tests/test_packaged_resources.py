@@ -7,7 +7,12 @@ from tradingagents.secretary.service import _env as secretary_templates
 
 
 def test_packaged_text_and_yaml_resources_are_readable():
-    assert "CREATE TABLE" in _load_migrations()[0].sql
+    migrations = _load_migrations()
+    assert [migration.name for migration in migrations] == [
+        "baseline",
+        "queue_lifecycle",
+    ]
+    assert "CREATE TABLE" in migrations[0].sql
     persona = load_packaged_persona("balanced")
     assert persona is not None
     assert persona.id == "balanced"

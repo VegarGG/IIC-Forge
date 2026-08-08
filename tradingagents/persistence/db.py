@@ -65,6 +65,7 @@ _APPLICATION_TABLES: Set[str] = {
     "watchlist",
     "queue_jobs",
     "deliveries",
+    "delivery_queue",
     "ingest_cursor",
     "tickers",
     "event_fingerprints",

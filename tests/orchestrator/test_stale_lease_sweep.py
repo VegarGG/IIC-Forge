@@ -8,8 +8,7 @@ from tradingagents.orchestrator import queue_store
 
 @pytest.mark.unit
 def test_worker_sweeps_stale_leases_on_boot(tmp_path):
-    """A run-loop iteration that starts with a stale 'running' job marks
-    it as 'error' and then proceeds normally."""
+    """A stale running job is made available for another bounded attempt."""
     from tradingagents.orchestrator.worker import boot_sweep
     db = str(tmp_path / "iic.db")
     conn = connect(db)
@@ -30,7 +29,7 @@ def test_worker_sweeps_stale_leases_on_boot(tmp_path):
     assert n == 1
     row = conn.execute("SELECT state FROM queue_jobs WHERE job_id=?",
                         (job["job_id"],)).fetchone()
-    assert row["state"] == "error"
+    assert row["state"] == "queued"
 
 
 @pytest.mark.unit
@@ -62,5 +61,5 @@ def test_sweep_reclaims_same_day_iso_t_started_ts(tmp_path):
     assert n == 1
     row = conn.execute("SELECT state, error FROM queue_jobs WHERE job_id=?",
                         (job["job_id"],)).fetchone()
-    assert row["state"] == "error"
+    assert row["state"] == "queued"
     assert row["error"] == "stale_lease_swept_in_loop"

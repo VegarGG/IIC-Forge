@@ -72,6 +72,8 @@ class TelegramOutbound(DeliveryChannel):
     channel_name = "telegram"
 
     def send(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
+        if mode in {"event_alert", "event_alert_light"}:
+            return super().send(brief=brief, mode=mode, body=body)
         cfg = self._config["telegram_bot"]
         if not cfg.get("enabled", False) or not cfg.get("allowed_chat_ids"):
             return store.insert_delivery(
@@ -80,6 +82,16 @@ class TelegramOutbound(DeliveryChannel):
                 skip_reason="telegram_disabled",
             )
         return super().send(brief=brief, mode=mode, body=body)
+
+    def send_attempt(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
+        cfg = self._config["telegram_bot"]
+        if not cfg.get("enabled", False) or not cfg.get("allowed_chat_ids"):
+            return store.insert_delivery(
+                self._conn, brief_id=brief["brief_id"], channel=self.channel_name,
+                status="skipped", sent_ts=None, channel_ref=None,
+                skip_reason="telegram_disabled",
+            )
+        return super().send_attempt(brief=brief, mode=mode, body=body)
 
     def _send_impl(self, brief: Dict[str, Any], mode: str, body: str) -> tuple:
         token = os.environ.get("IIC_TELEGRAM_BOT_TOKEN", "")

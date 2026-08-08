@@ -20,6 +20,8 @@ class EmailOutbound(DeliveryChannel):
     channel_name = "email"
 
     def send(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
+        if mode in {"event_alert", "event_alert_light"}:
+            return super().send(brief=brief, mode=mode, body=body)
         if not self._config["smtp"].get("enabled", False):
             return store.insert_delivery(
                 self._conn, brief_id=brief["brief_id"], channel=self.channel_name,
@@ -27,6 +29,15 @@ class EmailOutbound(DeliveryChannel):
                 skip_reason="smtp_disabled",
             )
         return super().send(brief=brief, mode=mode, body=body)
+
+    def send_attempt(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
+        if not self._config["smtp"].get("enabled", False):
+            return store.insert_delivery(
+                self._conn, brief_id=brief["brief_id"], channel=self.channel_name,
+                status="skipped", sent_ts=None, channel_ref=None,
+                skip_reason="smtp_disabled",
+            )
+        return super().send_attempt(brief=brief, mode=mode, body=body)
 
     def _send_impl(self, brief: Dict[str, Any], mode: str, body: str) -> tuple:
         smtp_cfg = self._config["smtp"]

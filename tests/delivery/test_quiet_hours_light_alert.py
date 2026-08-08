@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from tradingagents.delivery.base import DeliveryChannel
@@ -13,7 +13,7 @@ class FakeChannel(DeliveryChannel):
         return ("fake:1", None)
 
 
-def test_light_alert_respects_quiet_hours(tmp_path):
+def test_light_alert_queues_during_quiet_hours(tmp_path):
     conn = connect(str(tmp_path / "iic.db"))
     store.insert_brief(
         conn,
@@ -37,15 +37,18 @@ def test_light_alert_respects_quiet_hours(tmp_path):
             "brief_action_ttl_hours": 24,
         },
     )
-    with patch("tradingagents.delivery.base._local_now") as now:
-        now.return_value = time(23, 0)
+    with patch(
+        "tradingagents.delivery.queue_store._utc_now",
+        return_value=datetime(2026, 8, 8, 14, 30, tzinfo=timezone.utc),
+    ):
         delivery_id = ch.send(
             brief={"brief_id": "light1"},
             mode="event_alert_light",
             body="body",
         )
     row = conn.execute(
-        "SELECT * FROM deliveries WHERE delivery_id = ?", (delivery_id,),
+        "SELECT * FROM delivery_queue WHERE delivery_job_id = ?", (delivery_id,),
     ).fetchone()
-    assert row["status"] == "skipped"
-    assert row["skip_reason"] == "quiet_hours"
+    assert row["state"] == "queued"
+    assert row["attempt_count"] == 0
+    assert row["available_ts"] == "2026-08-08T23:00:00+00:00"

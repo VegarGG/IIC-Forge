@@ -1,5 +1,4 @@
-import sqlite3
-from datetime import time
+from datetime import datetime, time, timezone
 from unittest.mock import patch
 
 import pytest
@@ -9,7 +8,7 @@ from tradingagents.persistence import store
 
 
 @pytest.mark.unit
-def test_base_send_event_alert_during_quiet_hours_skips(tmp_path):
+def test_base_send_event_alert_during_quiet_hours_queues(tmp_path):
     from tradingagents.delivery.base import DeliveryChannel
 
     conn = iic_connect(str(tmp_path / "iic.db"))
@@ -31,18 +30,22 @@ def test_base_send_event_alert_during_quiet_hours_skips(tmp_path):
         },
     }
 
-    with patch("tradingagents.delivery.base._local_now",
-               return_value=time(23, 30)):
+    with patch(
+        "tradingagents.delivery.queue_store._utc_now",
+        return_value=datetime(2026, 8, 8, 14, 30, tzinfo=timezone.utc),
+    ):
         ch = Stub(conn=conn, config=cfg)
         delivery_id = ch.send(brief={"brief_id": "b1", "mode": "event_alert"},
                               mode="event_alert", body="...")
 
     row = conn.execute(
-        "SELECT status, skip_reason FROM deliveries WHERE delivery_id = ?",
+        "SELECT state, attempt_count, available_ts FROM delivery_queue "
+        "WHERE delivery_job_id = ?",
         (delivery_id,),
     ).fetchone()
-    assert row[0] == "skipped"
-    assert row[1] == "quiet_hours"
+    assert row[0] == "queued"
+    assert row[1] == 0
+    assert row[2] == "2026-08-08T23:00:00+00:00"
 
 
 @pytest.mark.unit

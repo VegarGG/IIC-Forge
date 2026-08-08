@@ -83,8 +83,8 @@ def watchlist_remove(ticker: str) -> None:
 # sense sub-app
 # ---------------------------------------------------------------------
 
-from tradingagents.sensing.seed_tickers import seed_all, seed_crypto
-from tradingagents.sensing.watchlist import sweep_expired
+from tradingagents.sensing.seed_tickers import seed_all, seed_crypto  # noqa: E402
+from tradingagents.sensing.watchlist import sweep_expired  # noqa: E402
 
 
 sense_app = typer.Typer(name="sense", help="Sensing operational commands")
@@ -182,6 +182,85 @@ def orchestrator_status() -> None:
             (r["error"] or "")[:40],
         )
     console.print(t)
+
+
+@orch_app.command("retry")
+def orchestrator_retry(job_id: int) -> None:
+    """Give one terminal analysis job one additional attempt."""
+    from tradingagents.orchestrator import queue_store
+
+    if not queue_store.retry_error_job(_conn(), job_id=job_id):
+        raise typer.BadParameter(f"job {job_id} is not in terminal error state")
+    console.print(f"[green]requeued[/green] analysis job {job_id}")
+
+
+# ---------------------------------------------------------------------
+# delivery queue sub-app (production Batch 3)
+# ---------------------------------------------------------------------
+
+delivery_app = typer.Typer(name="delivery", help="Durable alert-delivery queue")
+app.add_typer(delivery_app, name="delivery")
+
+
+@delivery_app.command("worker")
+def delivery_worker() -> None:
+    """Run the persistent Telegram/email delivery worker in the foreground."""
+    import logging
+    from tradingagents.delivery.worker import main
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    main()
+
+
+@delivery_app.command("status")
+def delivery_status() -> None:
+    """Show outbox state counts and the ten most recent delivery intents."""
+    conn = _conn()
+    counts = list(conn.execute(
+        "SELECT state, COUNT(*) AS n FROM delivery_queue GROUP BY state "
+        "ORDER BY state"
+    ))
+    if counts:
+        for row in counts:
+            console.print(f"{row['state']:<8}: {row['n']}")
+    else:
+        console.print("(delivery queue is empty)")
+
+    rows = list(conn.execute(
+        "SELECT delivery_job_id, brief_id, channel, mode, state, "
+        "attempt_count, max_attempts, available_ts, last_error "
+        "FROM delivery_queue ORDER BY delivery_job_id DESC LIMIT 10"
+    ))
+    if not rows:
+        return
+    table = Table("id", "brief", "channel", "mode", "state", "attempts", "ready", "error")
+    for row in rows:
+        table.add_row(
+            str(row["delivery_job_id"]),
+            row["brief_id"][:8],
+            row["channel"],
+            row["mode"],
+            row["state"],
+            f"{row['attempt_count']}/{row['max_attempts']}",
+            (row["available_ts"] or "")[:19],
+            (row["last_error"] or "")[:40],
+        )
+    console.print(table)
+
+
+@delivery_app.command("retry")
+def delivery_retry(delivery_job_id: int) -> None:
+    """Give one dead delivery intent one additional attempt."""
+    from tradingagents.delivery import queue_store
+
+    if not queue_store.retry_dead(_conn(), delivery_job_id=delivery_job_id):
+        raise typer.BadParameter(
+            f"delivery job {delivery_job_id} is not in dead state"
+        )
+    console.print(f"[green]requeued[/green] delivery job {delivery_job_id}")
 
 
 # ---------------------------------------------------------------------

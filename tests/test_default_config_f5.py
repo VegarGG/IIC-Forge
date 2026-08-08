@@ -13,10 +13,12 @@ def test_default_config_has_f5_keys(monkeypatch):
     C = importlib.reload(_dc).DEFAULT_CONFIG
 
     # Delivery channels + quiet hours
-    assert C["delivery"]["enabled_channels"] == ["email", "cli"]
+    assert C["delivery"]["enabled_channels"] == ["telegram", "email"]
     assert C["delivery"]["quiet_hours"]["enabled"] is True
     assert C["delivery"]["quiet_hours"]["start"] == "22:00"
     assert C["delivery"]["quiet_hours"]["end"] == "07:00"
+    assert C["delivery"]["quiet_hours"]["timezone"] == "Asia/Shanghai"
+    assert C["delivery"]["queue_max_attempts"] == 5
     assert C["delivery"]["digest_modes"]["telegram"] == "terse"
     assert C["delivery"]["digest_modes"]["email"] == "full"
     assert C["delivery"]["digest_modes"]["cli"] == "full"
@@ -54,3 +56,35 @@ def test_default_config_has_f5_keys(monkeypatch):
     assert C["refinement_chain_budget"]["max_usd_per_chain"] == 10.0
     assert C["morning_digest_token_ceiling"]["enabled"] is False
     assert C["morning_digest_token_ceiling"]["max_in_tokens"] == 500_000
+
+
+@pytest.mark.unit
+def test_smtp_delivery_config_is_env_overridable(monkeypatch):
+    import tradingagents.default_config as dc
+
+    monkeypatch.setenv("IIC_SMTP_ENABLED", "true")
+    monkeypatch.setenv("IIC_SMTP_HOST", "smtp.test.invalid")
+    monkeypatch.setenv("IIC_SMTP_PORT", "2525")
+    monkeypatch.setenv("IIC_SMTP_FROM_ADDR", "forge@test.invalid")
+    monkeypatch.setenv(
+        "IIC_SMTP_TO_ADDRS", "operator@test.invalid, audit@test.invalid"
+    )
+    config = {
+        "smtp": {
+            "enabled": False,
+            "host": "smtp.gmail.com",
+            "port": 587,
+            "from_addr": "",
+            "to_addrs": [],
+        }
+    }
+
+    result = dc._apply_nested_env_overrides(config)
+
+    assert result["smtp"] == {
+        "enabled": True,
+        "host": "smtp.test.invalid",
+        "port": 2525,
+        "from_addr": "forge@test.invalid",
+        "to_addrs": ["operator@test.invalid", "audit@test.invalid"],
+    }

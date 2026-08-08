@@ -100,6 +100,7 @@ def insert_brief(
     run_ids: Iterable[str],
     parent_brief_id: Optional[str] = None,
     trigger_event_id: Optional[str] = None,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         "INSERT INTO briefs (brief_id, mode, scope, generated_ts, content_path, "
@@ -107,7 +108,8 @@ def insert_brief(
         (brief_id, mode, scope, generated_ts, content_path,
          json.dumps(list(run_ids)), parent_brief_id, trigger_event_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # --------------------------------------------------------------------
@@ -121,13 +123,15 @@ def insert_brief_action(
     action_type: str,
     action_params: dict,
     expires_at: str,
+    commit: bool = True,
 ) -> int:
     cur = conn.execute(
         "INSERT INTO brief_actions (brief_id, action_type, action_params, "
         "state, expires_at) VALUES (?, ?, ?, 'pending', ?)",
         (brief_id, action_type, json.dumps(action_params), expires_at),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return _required_lastrowid(cur)
 
 
@@ -369,6 +373,7 @@ def upsert_suppression(
     until_ts: str,
     reason: Optional[str],
     created_by: str,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         "INSERT INTO suppression (key, until_ts, reason, created_by) "
@@ -379,7 +384,8 @@ def upsert_suppression(
         "created_by = excluded.created_by",
         (key, until_ts, reason, created_by),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_brief(

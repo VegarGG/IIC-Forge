@@ -17,6 +17,7 @@ from tradingagents.persistence import store
 from tradingagents.persistence.db import connect
 from tradingagents.orchestrator.candidates import fetch_candidates, fetch_candidates_grouped
 from tradingagents.orchestrator.guards import QueueBackpressure, QueueRateGuard
+from tradingagents.orchestrator import queue_store
 
 
 log = logging.getLogger(__name__)
@@ -125,16 +126,18 @@ def run_once(
         until_ts = (_now_utc() + timedelta(minutes=cooldown_min)).isoformat()
         try:
             with conn:    # one atomic tx per event
-                conn.execute(
-                    "INSERT INTO queue_jobs (job_type, payload, state, "
-                    "enqueued_ts, trigger_event_id) VALUES (?, ?, 'queued', ?, ?)",
-                    (
-                        "event_alert",
-                        json.dumps({"event_id": ev["event_id"],
-                                    "ticker": ev["ticker"]}),
-                        _now_utc().isoformat(),
-                        ev["event_id"],
+                queue_store.insert_queue_job(
+                    conn,
+                    job_type="event_alert",
+                    payload=json.dumps({
+                        "event_id": ev["event_id"],
+                        "ticker": ev["ticker"],
+                    }),
+                    trigger_event_id=ev["event_id"],
+                    idempotency_key=(
+                        f"legacy_event_alert:{ev['event_id']}:{ev['ticker']}"
                     ),
+                    commit=False,
                 )
                 store.upsert_suppression(
                     conn,
@@ -142,6 +145,7 @@ def run_once(
                     until_ts=until_ts,
                     reason=f"alert_cooldown event_id={ev['event_id']}",
                     created_by="promoter",
+                    commit=False,
                 )
             enqueued += 1
             log.info("enqueued event_alert event_id=%s ticker=%s",
