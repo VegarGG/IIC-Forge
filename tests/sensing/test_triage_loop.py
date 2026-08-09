@@ -1,4 +1,3 @@
-import asyncio
 import json
 import pytest
 import fakeredis.aioredis
@@ -48,15 +47,9 @@ async def test_consume_processes_one_envelope_then_acks(conn, tmp_path):
 
 
 @pytest.mark.unit
-async def test_dead_letter_after_max_failures(conn, tmp_path):
-    """A consistently-failing envelope ends up on ingest:dead.
-
-    Note: XREADGROUP `>` only returns new messages; re-delivery requires
-    XCLAIM or a `0` re-read. The triage in production pairs ``consume_once``
-    with the periodic ``dead_letter_sweep`` (here called directly with
-    ``max_deliveries=1`` so a single failure qualifies — minimum threshold).
-    """
-    from tradingagents.sensing.triage import Triage, dead_letter_sweep
+async def test_malformed_envelope_is_quarantined_without_retry(conn, tmp_path):
+    """Malformed source data is acknowledged and never consumes retry capacity."""
+    from tradingagents.sensing.triage import Triage
     from tradingagents.sensing.embeddings import MockEmbedder
     r = fakeredis.aioredis.FakeRedis(decode_responses=True)
     await ensure_consumer_group(r, stream="ingest:raw", group="triage")
@@ -65,14 +58,11 @@ async def test_dead_letter_after_max_failures(conn, tmp_path):
 
     t = Triage(conn=conn, redis=r, embedder=MockEmbedder(), llm_call=_llm(),
                 data_dir=str(tmp_path / "data"))
-    # One failed read leaves the entry on the PEL with times_delivered=1.
     await t.consume_once(group="triage", consumer="c1",
                           stream="ingest:raw", block_ms=10, batch=10)
-
-    moved = await dead_letter_sweep(
-        r, src_stream="ingest:raw", group="triage",
-        dead_stream="ingest:dead", max_deliveries=1,
-    )
-    assert moved == 1
-    dead = await r.xrange("ingest:dead")
-    assert len(dead) == 1
+    assert (await r.xpending("ingest:raw", "triage"))["pending"] == 0
+    assert await r.xlen("ingest:dead") == 0
+    row = conn.execute(
+        "SELECT reason_codes FROM ingest_quarantine"
+    ).fetchone()
+    assert json.loads(row[0]) == ["malformed_envelope"]

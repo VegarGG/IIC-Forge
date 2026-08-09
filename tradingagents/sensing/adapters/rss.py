@@ -6,10 +6,11 @@ Cursor format: JSON dict mapping feed_url → max published ISO timestamp.
 from __future__ import annotations
 
 import asyncio
+import calendar
+import hashlib
 import json
 import logging
 import sqlite3
-import time
 from datetime import datetime, timezone
 from typing import List
 
@@ -19,6 +20,7 @@ import redis.asyncio as aioredis
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.security.untrusted import normalize_untrusted_text
 
 
 log = logging.getLogger(__name__)
@@ -26,12 +28,15 @@ NAME = "rss"
 POLL_INTERVAL = 5 * 60
 
 
-def _entry_ts(entry) -> str:
+def _entry_ts(entry) -> tuple[str, bool]:
     if getattr(entry, "published_parsed", None):
-        dt = datetime.fromtimestamp(time.mktime(entry.published_parsed),
-                                     tz=timezone.utc)
-        return dt.isoformat()
-    return datetime.now(timezone.utc).isoformat()
+        # feedparser's struct_time is UTC. time.mktime interprets it in the
+        # host timezone and shifts every cursor on non-UTC hosts.
+        dt = datetime.fromtimestamp(
+            calendar.timegm(entry.published_parsed), tz=timezone.utc
+        )
+        return dt.isoformat(), False
+    return datetime.now(timezone.utc).isoformat(), True
 
 
 class RssAdapter:
@@ -73,28 +78,48 @@ class RssAdapter:
             except Exception as e:
                 log.warning("rss parse failed for %s: %s", feed_url, e)
                 continue
+            if getattr(feed, "bozo", False):
+                log.warning(
+                    "rss feed %s reported malformed content: %s",
+                    feed_url,
+                    getattr(feed, "bozo_exception", "unknown parse error"),
+                )
             last = cursors.get(feed_url, "")
             new_last = last
-            for entry in feed.entries:
-                ts = _entry_ts(entry)
+            ordered_entries = sorted(
+                feed.entries,
+                key=lambda item: _entry_ts(item)[0],
+            )
+            for entry in ordered_entries:
+                ts, timestamp_inferred = _entry_ts(entry)
                 if last and ts <= last:
                     continue
-                ext_id = f"rss:{getattr(entry, 'id', getattr(entry, 'link', ''))}"
-                text = " ".join(filter(None, [
+                raw_text = " ".join(filter(None, [
                     getattr(entry, "title", ""),
                     getattr(entry, "summary", ""),
                 ]))
+                text, _ = normalize_untrusted_text(raw_text, max_chars=20_000)
+                stable_id = getattr(entry, "id", "") or getattr(entry, "link", "")
+                if not stable_id:
+                    stable_id = hashlib.sha256(
+                        f"{feed_url}\0{ts}\0{text}".encode("utf-8")
+                    ).hexdigest()
+                ext_id = f"rss:{stable_id}"
                 env = Envelope(
                     source=NAME,
                     ingested_ts=datetime.now(timezone.utc).isoformat(),
                     external_id=ext_id, text=text,
-                    source_tags={"feed": feed_url,
-                                 "link": getattr(entry, "link", "")},
+                    source_tags={
+                        "feed": feed_url,
+                        "link": getattr(entry, "link", ""),
+                        "published_ts": ts,
+                        "published_ts_inferred": timestamp_inferred,
+                    },
                     raw_path="",
                 )
                 # Per-entry cursor is the feed-level dict, JSON-encoded.
                 cursors[feed_url] = ts
-                await writer.write(
+                published = await writer.write(
                     env,
                     raw_payload={
                         "title": getattr(entry, "title", ""),
@@ -104,7 +129,8 @@ class RssAdapter:
                     },
                     cursor=json.dumps(cursors),
                 )
-                emitted += 1
+                if published:
+                    emitted += 1
                 new_last = ts
             cursors[feed_url] = max(new_last, last) if last else new_last
         self._save_cursor(conn, cursors)

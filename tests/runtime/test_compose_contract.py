@@ -98,3 +98,12 @@ def test_compose_mounts_secrets_as_files_not_environment_values(compose):
     assert "POLYGON_API_KEY" not in environment
     assert "IIC_TELEGRAM_BOT_TOKEN" not in environment
     assert "IIC_SMTP_APP_PASSWORD" not in environment
+
+
+@pytest.mark.unit
+def test_compose_enforces_combined_beijing_day_llm_budget(compose):
+    environment = compose["x-app-common"]["environment"]
+    assert environment["TRADINGAGENTS_DAILY_BUDGET_ENABLED"] == "true"
+    assert environment["TRADINGAGENTS_DAILY_BUDGET_USD"] == "20"
+    assert environment["TRADINGAGENTS_DAILY_BUDGET_TIMEZONE"] == "Asia/Shanghai"
+    assert environment["TRADINGAGENTS_DAILY_BUDGET_RESERVATION_USD"] == "1"

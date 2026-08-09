@@ -20,13 +20,15 @@ def test_default_config_has_f4_keys():
     assert C["worker_process_start_method"] == "spawn"
     assert C["worker_process_poll_seconds"] == 0.5
     assert C["worker_process_terminate_grace_seconds"] == 5.0
-    # Cost guards — all off
+    # Queue guards remain off; the combined paid-LLM ceiling ships on.
     assert C["trigger_backpressure_enabled"] is False
     assert C["trigger_backpressure_max_pending"] == 20
     assert C["trigger_daily_rate_enabled"] is False
     assert C["trigger_daily_rate_max_jobs"] == 200
-    assert C["daily_budget_enabled"] is False
-    assert C["daily_budget_usd"] == 10.0
+    assert C["daily_budget_enabled"] is True
+    assert C["daily_budget_usd"] == 20.0
+    assert C["daily_budget_timezone"] == "Asia/Shanghai"
+    assert C["daily_budget_reservation_usd"] == 1.0
 
 
 @pytest.mark.unit

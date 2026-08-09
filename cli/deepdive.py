@@ -25,6 +25,7 @@ def _build_secretary(config: dict) -> Secretary:
         provider=config["llm_provider"],
         model=config["deep_think_llm"],
         base_url=config.get("backend_url"),
+        budget_config=config,
     )
     llm = client.get_llm()  # unwrap to the underlying LangChain chat model
     conn = iic_connect(config["iic_db_path"])

@@ -70,21 +70,36 @@ def validate_production_environment(
     ]
 
     provider = str(config.get("llm_provider") or "").strip().lower()
-    provider_secrets = {
-        "deepseek": "DEEPSEEK_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "google": "GOOGLE_API_KEY",
-        "gemini": "GOOGLE_API_KEY",
-    }
-    if provider == "local":
-        if not _present(env, "LOCAL_LLM_BASE_URL"):
-            errors.append("local LLM provider requires LOCAL_LLM_BASE_URL")
-    elif provider in provider_secrets:
-        required = provider_secrets[provider]
-        if not _present(env, required):
-            errors.append(f"LLM provider {provider!r} requires {required}")
-    else:
-        errors.append(f"unsupported production LLM provider: {provider!r}")
+    if provider != "deepseek":
+        errors.append(
+            "production LLM provider must be deepseek so the USD budget can fail closed"
+        )
+    elif not _present(env, "DEEPSEEK_API_KEY"):
+        errors.append("LLM provider 'deepseek' requires DEEPSEEK_API_KEY")
+    approved_models = {"deepseek-v4-flash", "deepseek-v4-pro"}
+    quick_model = str(config.get("quick_think_llm") or "").strip().lower()
+    deep_model = str(config.get("deep_think_llm") or "").strip().lower()
+    if quick_model != "deepseek-v4-flash" or deep_model != "deepseek-v4-pro":
+        errors.append(
+            "production quick/deep LLM models must be deepseek-v4-flash and "
+            "deepseek-v4-pro respectively"
+        )
+
+    for role in ("triage_salience", "alert_gate"):
+        role_config = (config.get("llm_roles") or {}).get(role) or {}
+        role_provider = str(role_config.get("provider") or provider).strip().lower()
+        role_model = str(
+            role_config.get("model") or config.get("quick_think_llm") or ""
+        ).strip().lower()
+        if role_provider in {"local", "ollama"}:
+            if not role_model:
+                errors.append(f"production LLM role '{role}' requires a model")
+            continue
+        if role_provider != "deepseek" or role_model not in approved_models:
+            errors.append(
+                f"production paid LLM role '{role}' must resolve to DeepSeek "
+                "V4 Flash or V4 Pro"
+            )
 
     db_path = Path(str(config.get("iic_db_path") or ""))
     data_dir = Path(str(config.get("iic_data_dir") or ""))
@@ -104,6 +119,14 @@ def validate_production_environment(
         errors.append("Compose services must not use a loopback Redis hostname")
     if not bool(config.get("sensing_require_aof_fsync")):
         errors.append("production ingestion requires Redis AOF fsync fencing")
+    if int(config.get("sensing_max_source_age_hours", 0)) != 24:
+        errors.append("production source freshness window must be 24 hours")
+    if int(config.get("sensing_future_skew_seconds", 0)) != 300:
+        errors.append("production source future-skew allowance must be 300 seconds")
+    if int(config.get("sensing_max_event_text_chars", 0)) != 20_000:
+        errors.append("production event text limit must be 20000 characters")
+    if int(config.get("sensing_max_raw_payload_bytes", 0)) != 1_048_576:
+        errors.append("production raw payload limit must be 1048576 bytes")
 
     adapter_config = config.get("sensing_adapters_enabled") or {}
     approved = {"polygon_news", "telegram", "rss"}
@@ -117,6 +140,16 @@ def validate_production_environment(
         errors.append("the production orchestrator must be enabled")
     if int(config.get("max_concurrent_jobs", 0)) != 1:
         errors.append("the private deployment requires exactly one analysis worker")
+    if (
+        config.get("daily_budget_enabled") is not True
+        or float(config.get("daily_budget_usd", 0)) != 20.0
+        or config.get("daily_budget_timezone") != "Asia/Shanghai"
+        or float(config.get("daily_budget_reservation_usd", 0)) != 1.0
+    ):
+        errors.append(
+            "combined LLM budget must be enabled at USD20/day with a USD1 "
+            "reservation and Asia/Shanghai reset"
+        )
 
     delivery = config.get("delivery") or {}
     if set(delivery.get("enabled_channels") or []) != {"telegram", "email"}:
@@ -228,6 +261,7 @@ def initialize_runtime(
         data_dir / "cache",
         data_dir / "events",
         data_dir / "events" / "staging",
+        data_dir / "events" / "quarantine",
         data_dir / "logs",
         data_dir / "memory",
         data_dir / "reports",

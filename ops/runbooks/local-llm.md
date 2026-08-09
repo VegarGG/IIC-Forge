@@ -131,7 +131,9 @@ To flip a role from `fallback: "none"` to `fallback: "api"`, you must either:
 When `fallback: "api"` is active, a dead startup probe or a consecutive
 runtime failure run that reaches `fallback_threshold` (default: 3) causes
 the role to re-resolve to the global provider. The daily fallback budget
-(`fallback_daily_budget: 500` calls/UTC-day) caps the API spend. Budget
+(`fallback_daily_budget: 500` calls/UTC-day) is a secondary call-count fuse.
+Every paid fallback request is also fenced by the shared USD 20
+`Asia/Shanghai`-day ledger described in the Batch 7 production runbook. Budget
 consumption is persisted in `ops_counters` and survives restarts.
 
 The `fallback: "none"` default is the **recommended mode for production**:

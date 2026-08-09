@@ -165,9 +165,11 @@ docker compose ps
 ```
 
 See
-[`ops/runbooks/production-readiness-batch-6.md`](ops/runbooks/production-readiness-batch-6.md)
-for first boot, health gates, durability probes, live delivery tests, upgrades,
-and rollback. Local editable installs remain supported for development:
+[`ops/runbooks/production-readiness-batch-7.md`](ops/runbooks/production-readiness-batch-7.md)
+for the current data-trust and combined-budget release gates. The
+[`Batch 6 Compose runbook`](ops/runbooks/production-readiness-batch-6.md)
+contains first boot, health, durability, live delivery, upgrade, and rollback
+procedures. Local editable installs remain supported for development:
 
 ```bash
 pip install -e ".[dev,production]"

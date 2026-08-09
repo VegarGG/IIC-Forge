@@ -70,6 +70,7 @@ def _build_secretary(config: dict, conn: sqlite3.Connection):
         provider=config["llm_provider"],
         model=config["deep_think_llm"],
         base_url=config.get("backend_url"),
+        budget_config=config,
     )
     llm = client.get_llm()
     return Secretary(conn=conn, data_dir=config["iic_data_dir"], llm=llm)
@@ -553,6 +554,8 @@ def main(
     budget = DailyBudgetGuard(
         enabled=cfg["daily_budget_enabled"],
         daily_usd=cfg["daily_budget_usd"],
+        timezone_name=cfg["daily_budget_timezone"],
+        reservation_usd=cfg["daily_budget_reservation_usd"],
     )
     timeout_seconds = float(
         cfg.get("worker_job_timeout_seconds")

@@ -149,7 +149,7 @@ def test_estimate_usd_nonzero_for_deepseek():
     # Root-cause regression: usd_estimate must be > 0 for DeepSeek so the
     # worker's SUM(costs.usd_estimate) no longer yields $0.0000.
     usd = estimate_usd(
-        "deepseek-chat", in_tokens=10000, out_tokens=2000,
+        "deepseek-v4-flash", in_tokens=10000, out_tokens=2000,
         cache_hit_tokens=0, cache_miss_tokens=10000,
     )
     assert usd is not None and usd > 0
@@ -157,11 +157,11 @@ def test_estimate_usd_nonzero_for_deepseek():
 
 def test_estimate_usd_uses_cache_hit_rate():
     full_miss = estimate_usd(
-        "deepseek-chat", in_tokens=10000, out_tokens=0,
+        "deepseek-v4-flash", in_tokens=10000, out_tokens=0,
         cache_hit_tokens=0, cache_miss_tokens=10000,
     )
     all_hit = estimate_usd(
-        "deepseek-chat", in_tokens=10000, out_tokens=0,
+        "deepseek-v4-flash", in_tokens=10000, out_tokens=0,
         cache_hit_tokens=10000, cache_miss_tokens=0,
     )
     # Cache hits are billed cheaper, so a fully-cached prompt costs less.

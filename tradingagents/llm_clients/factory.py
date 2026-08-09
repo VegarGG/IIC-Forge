@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from .base_client import BaseLLMClient
 
@@ -19,6 +19,7 @@ def create_llm_client(
     provider: str,
     model: str,
     base_url: Optional[str] = None,
+    budget_config: Optional[Mapping[str, Any]] = None,
     **kwargs,
 ) -> BaseLLMClient:
     """Create an LLM client for the specified provider.
@@ -40,6 +41,14 @@ def create_llm_client(
         ValueError: If provider is not supported
     """
     provider_lower = provider.lower()
+    from .daily_budget import append_budget_callback
+
+    kwargs = append_budget_callback(
+        kwargs,
+        provider=provider_lower,
+        model=model,
+        config=budget_config,
+    )
 
     if provider_lower in _OPENAI_COMPATIBLE:
         from .openai_client import OpenAIClient
@@ -129,5 +138,9 @@ def create_role_llm(role: str, config: Dict[str, Any]) -> BaseLLMClient:
         kwargs["extra_body"] = copy.deepcopy(extra_body)
 
     return create_llm_client(
-        provider=provider, model=model, base_url=base_url, **kwargs
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        budget_config=config,
+        **kwargs,
     )

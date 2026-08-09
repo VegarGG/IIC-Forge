@@ -18,6 +18,7 @@ from typing import List
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.security.untrusted import normalize_untrusted_text
 
 
 log = logging.getLogger(__name__)
@@ -35,10 +36,19 @@ async def _on_message(
     aof_fsync_timeout_ms: int = 5000,
 ) -> None:
     msg = event.message
-    text = (msg.message or "").strip()
+    text, _ = normalize_untrusted_text(msg.message or "", max_chars=20_000)
     if not text:
         return
-    channel = getattr(event.chat, "username", None) or "unknown"
+    channel = (getattr(event.chat, "username", None) or "unknown").lstrip("@")
+    if isinstance(msg.date, datetime):
+        published_date = msg.date
+        if published_date.tzinfo is None:
+            published_date = published_date.replace(tzinfo=timezone.utc)
+        published_ts = published_date.astimezone(timezone.utc).isoformat()
+    else:
+        # Test doubles and compatible Telegram clients may expose only the
+        # documented isoformat-style interface.
+        published_ts = str(msg.date.isoformat())
     cs = CursorStore(conn)
     cursors = json.loads(cs.get(NAME) or "{}")
     cursors[channel] = max(int(cursors.get(channel, 0)), int(msg.id))
@@ -47,8 +57,7 @@ async def _on_message(
         ingested_ts=datetime.now(timezone.utc).isoformat(),
         external_id=f"tg:{channel}:{msg.id}",
         text=text,
-        source_tags={"channel": channel,
-                     "msg_date": msg.date.isoformat()},
+        source_tags={"channel": channel, "published_ts": published_ts},
         raw_path="",
     )
     writer = EnvelopeWriter(
@@ -62,6 +71,7 @@ async def _on_message(
     )
     await writer.write(env, raw_payload={"channel": channel,
                                           "message_id": msg.id,
+                                          "published_ts": published_ts,
                                           "text": text},
                        cursor=json.dumps(cursors))
 

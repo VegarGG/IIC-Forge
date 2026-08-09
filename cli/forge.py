@@ -171,15 +171,26 @@ def orchestrator_worker() -> None:
 def orchestrator_status() -> None:
     """Quick view of queue depth + recent jobs + today's spend."""
     from tradingagents.orchestrator import queue_store
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.llm_clients.daily_budget import (
+        beijing_budget_date,
+        daily_budget_total,
+    )
 
     conn = _conn()
     pending = queue_store.pending_count(conn)
     today_enqueued = queue_store.daily_enqueue_count(conn)
-    today_cost = queue_store.daily_cost_total(conn)
+    budget_date = beijing_budget_date(
+        timezone_name=DEFAULT_CONFIG["daily_budget_timezone"]
+    )
+    today_cost = daily_budget_total(conn, budget_date=budget_date)
 
     console.print(f"pending (queued+running): [bold]{pending}[/bold]")
     console.print(f"enqueued today          : {today_enqueued}")
-    console.print(f"spend today (USD)       : ${today_cost:.4f}")
+    console.print(
+        f"combined LLM spend {budget_date} (USD): ${today_cost:.4f} / "
+        f"${DEFAULT_CONFIG['daily_budget_usd']:.2f}"
+    )
 
     rows = list(
         conn.execute(

@@ -13,6 +13,7 @@ import logging
 
 from tradingagents.llm_clients.capabilities import get_capabilities, is_default_caps
 from tradingagents.llm_clients.postprocess import strip_think_blocks
+from tradingagents.security.untrusted import render_untrusted_payload
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +86,12 @@ def build_alert_evaluation_prompt(*, event_text: str, tickers: list[str]) -> str
         "Return strict JSON with keys: decision, score, materiality, actionability, "
         "ticker_link_evidence, novelty, disqualifiers, reasons.\n\n"
         f"TICKERS: {', '.join(tickers)}\n\n"
-        f"EVENT:\n{event_text[:5000]}"
+        + render_untrusted_payload(
+            "alert_candidate",
+            event_text,
+            metadata={"tickers": tickers},
+            max_chars=5000,
+        )
     )
 
 

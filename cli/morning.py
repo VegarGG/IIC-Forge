@@ -35,6 +35,7 @@ def _build_secretary(config: dict) -> Tuple[Any, sqlite3.Connection]:
         provider=config["llm_provider"],
         model=config["deep_think_llm"],
         base_url=config.get("backend_url"),
+        budget_config=config,
     ).get_llm()
     conn = iic_connect(config["iic_db_path"])
     sec = Secretary(conn=conn, data_dir=config["iic_data_dir"], llm=llm)

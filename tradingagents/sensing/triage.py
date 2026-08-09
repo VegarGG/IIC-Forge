@@ -8,6 +8,8 @@ This module exposes:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -16,6 +18,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Sequence
 
@@ -25,10 +28,17 @@ if TYPE_CHECKING:  # import-light: availability pulls in openai/httpx
     from tradingagents.llm_clients.availability import AvailabilityCounter
 
 from tradingagents.persistence.store import (
-    insert_event, insert_event_ticker,
+    insert_event,
+    insert_event_ticker,
+    insert_ingest_quarantine,
 )
 from tradingagents.sensing.dedupe import DedupeStage1, DedupeStage2
-from tradingagents.sensing.envelope import Envelope
+from tradingagents.sensing.envelope import Envelope, EnvelopeDecodeError
+from tradingagents.sensing.quality import (
+    EnvelopeQualityPolicy,
+    assess_envelope,
+    parse_allowlist,
+)
 from tradingagents.sensing.salience import SalienceScorer, SalienceResult
 from tradingagents.sensing.ticker_validator import TickerValidator
 from tradingagents.sensing.watchlist import auto_promote
@@ -40,7 +50,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class TriageResult:
     event_id: str
-    status: str               # "triaged" | "duplicate"
+    status: str               # "triaged" | "duplicate" | "quarantined"
     salience: Optional[float] = None
     deduped_of: Optional[str] = None
     matched_tickers: Sequence[str] = ()
@@ -131,6 +141,7 @@ class Triage:
         salience_cache_ttl_seconds: int = 86400,
         ttl_days: int = 7,
         availability_counter: "Optional[AvailabilityCounter]" = None,
+        quality_policy: Optional[EnvelopeQualityPolicy] = None,
     ) -> None:
         self._conn = conn
         self._redis = redis
@@ -167,6 +178,9 @@ class Triage:
         # D5 (Task 15): failure counter bumped whenever the scorer defers.
         # Optional so unit tests / callers without availability wiring work.
         self._availability_counter = availability_counter
+        self._quality_policy = quality_policy or EnvelopeQualityPolicy(
+            data_dir=data_dir
+        )
         # In-process cached active watchlist; refreshed by the loop every N s.
         self._watchlist: list[str] = []
 
@@ -175,7 +189,12 @@ class Triage:
         return uuid.uuid4().hex
 
     def _prepare_raw_path(
-        self, event_id: str, src_staging_path: str, *, consume: bool = True
+        self,
+        event_id: str,
+        src_staging_path: str,
+        *,
+        consume: bool = True,
+        directory: str = "events",
     ) -> _PreparedRaw:
         """Durably copy staging data before the corresponding SQLite commit.
 
@@ -184,7 +203,7 @@ class Triage:
         staging intact, so the pending Redis envelope can be retried without
         losing its raw payload.
         """
-        canonical_dir = Path(self._data_dir) / "events"
+        canonical_dir = Path(self._data_dir) / directory
         canonical_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         dst = canonical_dir / f"{event_id}.json"
         if not src_staging_path:
@@ -213,6 +232,71 @@ class Triage:
             dst.unlink(missing_ok=True)
             raise
         return _PreparedRaw(str(dst), src, dst, consume)
+
+    def _insert_quarantine(
+        self,
+        env: Envelope,
+        *,
+        reasons: Sequence[str],
+        warnings: Sequence[str] = (),
+        copy_raw: bool,
+        details: Optional[dict] = None,
+    ) -> TriageResult:
+        quarantine_id = self._new_event_id()
+        encoded = env.to_json().encode("utf-8")
+        raw = self._prepare_raw_path(
+            quarantine_id,
+            env.raw_path if copy_raw else "",
+            directory="events/quarantine",
+        )
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            insert_ingest_quarantine(
+                self._conn,
+                quarantine_id=quarantine_id,
+                source=env.source or "unknown",
+                external_id=env.external_id or None,
+                observed_ts=datetime.now(timezone.utc).isoformat(),
+                reason_codes=reasons,
+                warning_codes=warnings,
+                raw_path=raw.canonical_path or None,
+                envelope_sha256=hashlib.sha256(encoded).hexdigest(),
+                byte_count=len(encoded),
+                details=details or {"stage": "triage_quality_gate"},
+                commit=False,
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raw.rollback()
+            raise
+        raw.commit()
+        log.warning(
+            "ingestion quarantined id=%s source=%s reasons=%s",
+            quarantine_id,
+            env.source,
+            ",".join(reasons),
+        )
+        return TriageResult(event_id=quarantine_id, status="quarantined")
+
+    def quarantine_malformed(self, fields: dict[str, str], error: Exception) -> str:
+        serialized = json.dumps(
+            fields, ensure_ascii=False, sort_keys=True, default=str
+        )
+        encoded = serialized.encode("utf-8")
+        quarantine_id = self._new_event_id()
+        insert_ingest_quarantine(
+            self._conn,
+            quarantine_id=quarantine_id,
+            source="unknown",
+            external_id=None,
+            observed_ts=datetime.now(timezone.utc).isoformat(),
+            reason_codes=["malformed_envelope"],
+            envelope_sha256=hashlib.sha256(encoded).hexdigest(),
+            byte_count=len(encoded),
+            details={"stage": "redis_decode", "error": type(error).__name__},
+        )
+        return quarantine_id
 
     def _insert_duplicate(
         self, env: Envelope, *, deduped_of: str
@@ -248,6 +332,16 @@ class Triage:
     # ------------------------------------------------------------------
     async def process_one(self, env: Envelope) -> TriageResult:
         """Run the full pipeline on one envelope. Always writes a row."""
+        quality = assess_envelope(env, policy=self._quality_policy)
+        if not quality.accepted:
+            return self._insert_quarantine(
+                env,
+                reasons=quality.errors,
+                warnings=quality.warnings,
+                copy_raw=quality.raw_path_safe,
+            )
+        env = quality.envelope
+
         # Stage 1: hash / external_id dedupe.
         hit1 = await self._ds1.check(env)
         if hit1:
@@ -483,6 +577,28 @@ async def _process_entry(self, *, env_id, raw_fields, group: str,
             log.warning("could not trim acknowledged stream entry %s", env_id,
                         exc_info=True)
         return True
+    except EnvelopeDecodeError as exc:
+        try:
+            fields = _decode_fields(raw_fields)
+            quarantine_id = self.quarantine_malformed(fields, exc)
+            await self._redis.xack(stream, group, env_id)
+            try:
+                await self._redis.xdel(stream, env_id)
+            except Exception:
+                log.warning(
+                    "could not trim quarantined stream entry %s",
+                    env_id,
+                    exc_info=True,
+                )
+            log.warning(
+                "malformed stream entry %s quarantined as %s",
+                env_id,
+                quarantine_id,
+            )
+            return True
+        except Exception:
+            log.exception("could not quarantine malformed stream entry %s", env_id)
+            return False
     except Exception:
         log.exception("triage failed for %s; leaving on PEL", env_id)
         return False
@@ -760,6 +876,21 @@ def _main() -> None:
         confidence_threshold=C["sensing_watchlist_confidence_threshold"],
         salience_cache_ttl_seconds=C["sensing_salience_cache_ttl_seconds"],
         ttl_days=C["sensing_watchlist_ttl_days"],
+        quality_policy=EnvelopeQualityPolicy(
+            data_dir=C["iic_data_dir"],
+            max_source_age_hours=int(C["sensing_max_source_age_hours"]),
+            future_skew_seconds=int(C["sensing_future_skew_seconds"]),
+            max_event_text_chars=int(C["sensing_max_event_text_chars"]),
+            max_raw_payload_bytes=int(C["sensing_max_raw_payload_bytes"]),
+            require_staging_raw_path=True,
+            enforce_source_contracts=True,
+            allowed_telegram_channels=parse_allowlist(
+                C.get("telegram_channels") or []
+            ),
+            allowed_rss_feeds=parse_allowlist(
+                os.environ.get("RSS_FEEDS", "")
+            ),
+        ),
         availability_counter=availability_counter,
     )
 

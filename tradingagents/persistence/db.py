@@ -71,10 +71,12 @@ _APPLICATION_TABLES: Set[str] = {
     "tickers",
     "event_fingerprints",
     "event_embeddings",
+    "ingest_quarantine",
     "alert_evaluations",
     "analysis_packs",
     "shadow_eval",
     "ops_counters",
+    "llm_budget_ledger",
 }
 
 _EXPECTED_TABLES: Set[str] = _APPLICATION_TABLES | {"schema_migrations"}

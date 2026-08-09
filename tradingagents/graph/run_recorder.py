@@ -19,26 +19,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from tradingagents.llm_clients.pricing import estimate_usd as estimate_model_usd
 from tradingagents.persistence import store
 
 
 _DECISION_RE = re.compile(r"\b(BUY|HOLD|SELL)\b", re.IGNORECASE)
-
-
-# DeepSeek published prices, USD per 1M tokens (deepseek.com/pricing,
-# standard / cache-miss rate). Cache-hit input is billed at a lower rate, so
-# when the cost callback splits prompt tokens into hit/miss we bill each at the
-# correct rate; otherwise all input tokens fall back to the miss (full) rate.
-# These are deliberately conservative defaults used only for the usd_estimate
-# instrumentation column — measurement, not enforcement (cost guards stay off).
-_DEEPSEEK_PRICING = {
-    # model substring -> (input_miss, input_hit, output) USD per 1M tokens
-    "deepseek-reasoner": (0.55, 0.14, 2.19),
-    "deepseek-chat":     (0.27, 0.07, 1.10),
-}
-# Fallback applied to any model whose name contains "deepseek" but isn't an
-# exact known id (e.g. a dated alias). Uses the deepseek-chat rate.
-_DEEPSEEK_DEFAULT_PRICING = (0.27, 0.07, 1.10)
 
 
 def estimate_usd(
@@ -59,29 +44,14 @@ def estimate_usd(
     billed at the (cheaper) cache-hit rate and the miss portion at the standard
     rate. Otherwise the full prompt is billed at the standard (miss) rate.
     """
-    name = (model or "").lower()
-    pricing = None
-    for key, rates in _DEEPSEEK_PRICING.items():
-        if key in name:
-            pricing = rates
-            break
-    if pricing is None and "deepseek" in name:
-        pricing = _DEEPSEEK_DEFAULT_PRICING
-    if pricing is None:
-        return None
-    in_miss_rate, in_hit_rate, out_rate = pricing
-    hit = cache_hit_tokens or 0
-    miss = cache_miss_tokens or 0
-    if hit or miss:
-        billed_hit, billed_miss = hit, miss
-    else:
-        billed_hit, billed_miss = 0, in_tokens
-    usd = (
-        billed_hit * in_hit_rate
-        + billed_miss * in_miss_rate
-        + out_tokens * out_rate
-    ) / 1_000_000
-    return round(usd, 6)
+    return estimate_model_usd(
+        "deepseek",
+        model,
+        in_tokens=in_tokens,
+        out_tokens=out_tokens,
+        cache_hit_tokens=cache_hit_tokens,
+        cache_miss_tokens=cache_miss_tokens,
+    )
 
 
 def compute_cache_hit_ratio(

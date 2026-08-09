@@ -27,6 +27,7 @@ REQUIRED_PACKAGE_FILES = {
     "tradingagents/persistence/migrations/0002_queue_lifecycle.sql",
     "tradingagents/persistence/migrations/0003_analysis_worker_process.sql",
     "tradingagents/persistence/migrations/0004_delivery_outbox_controls.sql",
+    "tradingagents/persistence/migrations/0005_quality_security_budget.sql",
     "tradingagents/personas/balanced.yaml",
     "tradingagents/personas/macro.yaml",
     "tradingagents/personas/momentum.yaml",

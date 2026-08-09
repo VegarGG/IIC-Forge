@@ -97,6 +97,60 @@ def test_production_environment_rejects_wrong_morning_schedule(tmp_path):
 
 
 @pytest.mark.unit
+def test_production_environment_rejects_budget_or_pricing_drift(tmp_path):
+    from tradingagents.runtime import validate_production_environment
+
+    config = _production_config(tmp_path)
+    config["daily_budget_usd"] = 20.01
+    config["daily_budget_timezone"] = "UTC"
+    config["quick_think_llm"] = "unpriced-model"
+    errors = validate_production_environment(config, _production_environment(tmp_path))
+    assert any("combined LLM budget" in error for error in errors)
+    assert any("deepseek-v4-flash" in error for error in errors)
+
+    swapped = _production_config(tmp_path)
+    swapped["quick_think_llm"] = "deepseek-v4-pro"
+    swapped["deep_think_llm"] = "deepseek-v4-flash"
+    swapped_errors = validate_production_environment(
+        swapped, _production_environment(tmp_path)
+    )
+    assert any("respectively" in error for error in swapped_errors)
+
+
+@pytest.mark.unit
+def test_production_environment_rejects_unpriced_provider(tmp_path):
+    from tradingagents.runtime import validate_production_environment
+
+    config = _production_config(tmp_path)
+    config["llm_provider"] = "openai"
+    errors = validate_production_environment(config, _production_environment(tmp_path))
+    assert any("must be deepseek" in error for error in errors)
+
+
+@pytest.mark.unit
+def test_production_environment_rejects_unpriced_paid_role_override(tmp_path):
+    from tradingagents.runtime import validate_production_environment
+
+    config = _production_config(tmp_path)
+    config["llm_roles"]["alert_gate"]["provider"] = "openai"
+    config["llm_roles"]["alert_gate"]["model"] = "gpt-unpriced"
+    errors = validate_production_environment(config, _production_environment(tmp_path))
+    assert any("paid LLM role 'alert_gate'" in error for error in errors)
+
+
+@pytest.mark.unit
+def test_production_environment_allows_free_local_role_override(tmp_path):
+    from tradingagents.runtime import validate_production_environment
+
+    config = _production_config(tmp_path)
+    config["llm_roles"]["triage_salience"]["provider"] = "local"
+    config["llm_roles"]["triage_salience"]["model"] = "operator-local-model"
+    assert validate_production_environment(
+        config, _production_environment(tmp_path)
+    ) == []
+
+
+@pytest.mark.unit
 def test_initialize_runtime_bootstraps_private_verified_database(tmp_path):
     from tradingagents.runtime import initialize_runtime
 
@@ -109,9 +163,10 @@ def test_initialize_runtime_bootstraps_private_verified_database(tmp_path):
     database = Path(result["database"])
     assert result["integrity"] == "ok"
     assert result["foreign_key_violations"] == 0
-    assert result["migrations"][-1]["version"] == 4
+    assert result["migrations"][-1]["version"] == 5
     assert database.stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "data" / "events" / "staging").stat().st_mode & 0o777 == 0o700
+    assert (tmp_path / "data" / "events" / "quarantine").stat().st_mode & 0o777 == 0o700
 
 
 @pytest.mark.unit

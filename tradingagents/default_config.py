@@ -24,6 +24,10 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SENSING_REQUIRE_AOF_FSYNC": "sensing_require_aof_fsync",
     "TRADINGAGENTS_COST_GUARD_ENABLED":   "cost_guard_enabled",
     "TRADINGAGENTS_ORCHESTRATOR_ENABLED": "orchestrator_enabled",
+    "TRADINGAGENTS_DAILY_BUDGET_ENABLED": "daily_budget_enabled",
+    "TRADINGAGENTS_DAILY_BUDGET_USD":     "daily_budget_usd",
+    "TRADINGAGENTS_DAILY_BUDGET_TIMEZONE": "daily_budget_timezone",
+    "TRADINGAGENTS_DAILY_BUDGET_RESERVATION_USD": "daily_budget_reservation_usd",
 }
 
 
@@ -148,6 +152,12 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     "sensing_watchlist_refresh_seconds": 60,
     "sensing_salience_cache_ttl_seconds": 86400,
     "sensing_embedder_model": "sentence-transformers/all-MiniLM-L6-v2",
+    # Batch 7 external-input trust boundary. Source timestamps older than one
+    # day are retained in quarantine and never reach embedding or an LLM.
+    "sensing_max_source_age_hours": 24,
+    "sensing_future_skew_seconds": 300,
+    "sensing_max_event_text_chars": 20_000,
+    "sensing_max_raw_payload_bytes": 1_048_576,
     "sensing_adapters_enabled": {
         "polygon_news": True,
         "telegram": True,
@@ -181,13 +191,18 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     "queue_retry_base_seconds": 30,
     "queue_retry_cap_seconds": 900,
     "queue_lease_margin_seconds": 300,
-    # Cost guards (program-spec Appendix A: enabled=False during F0–F5)
+    # Queue guards remain separately configurable. The combined paid-LLM
+    # budget is enforced before every provider request across all processes.
     "trigger_backpressure_enabled": False,
     "trigger_backpressure_max_pending": 20,
     "trigger_daily_rate_enabled": False,
     "trigger_daily_rate_max_jobs": 200,
-    "daily_budget_enabled": False,
-    "daily_budget_usd": 10.0,
+    "daily_budget_enabled": True,
+    "daily_budget_usd": 20.0,
+    "daily_budget_timezone": "Asia/Shanghai",
+    # DeepSeek V4-Pro's conservative full-context + max-output upper bound is
+    # below $1 at the official 2026-08-09 price schedule.
+    "daily_budget_reservation_usd": 1.0,
     # Optional cap on the number of resolved memory log entries. When set,
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
@@ -343,8 +358,9 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     # fallback (Task 15 / D5): "none" (default — a dead local endpoint refuses
     # to start / skips cycles) or "api" (after fallback_threshold consecutive
     # runtime failures — or a failed startup probe — the role re-resolves to
-    # the GLOBAL provider, hard-bounded by fallback_daily_budget calls per UTC
-    # day). The budget key only matters when fallback="api", so the all-None
+    # the GLOBAL provider, secondarily bounded by fallback_daily_budget calls
+    # per UTC day in addition to the combined Beijing-day USD ledger). The
+    # fallback budget key only matters when fallback="api", so the all-None
     # production-default behavior is unchanged. fallback_threshold ALSO arms
     # the Task 17 endpoint-down self-alert in every fallback mode: when a
     # daemon's consecutive-failure run reaches it, ONE operator self-alert is

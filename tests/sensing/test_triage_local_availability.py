@@ -424,6 +424,7 @@ async def test_process_one_deferred_marks_event_skips_dedupe_and_counts(
 ):
     from tradingagents.llm_clients.availability import AvailabilityCounter
     from tradingagents.sensing.embeddings import MockEmbedder
+    from tradingagents.sensing.quality import EnvelopeQualityPolicy
     from tradingagents.sensing.triage import Triage
 
     counter = AvailabilityCounter(name="triage_llm_failures", conn=conn)
@@ -440,13 +441,23 @@ async def test_process_one_deferred_marks_event_skips_dedupe_and_counts(
         })
 
     r = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    t = Triage(conn=conn, redis=r, embedder=MockEmbedder(), llm_call=flaky,
-               data_dir=str(tmp_path / "data"), availability_counter=counter)
+    data_dir = tmp_path / "data"
+    t = Triage(
+        conn=conn,
+        redis=r,
+        embedder=MockEmbedder(),
+        llm_call=flaky,
+        data_dir=str(data_dir),
+        availability_counter=counter,
+        quality_policy=EnvelopeQualityPolicy(
+            data_dir=str(data_dir), require_staging_raw_path=True
+        ),
+    )
 
     # A REAL staging raw file: the deferred path must not consume it, or the
     # redelivery's re-scored event ends up with raw_path="" (no raw text for
     # the secretary's compose).
-    staging = tmp_path / "staging" / "x.json"
+    staging = data_dir / "events" / "staging" / "x.json"
     staging.parent.mkdir(parents=True, exist_ok=True)
     staging.write_text(
         json.dumps({"text": "Apple reports a big beat on Q3 revenue"}),

@@ -10,7 +10,9 @@ import json
 import os
 import sqlite3
 import uuid
+import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +20,10 @@ import redis.asyncio as aioredis
 
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.sensing.quality import (
+    MAX_ENVELOPE_BYTES,
+    MAX_RAW_PAYLOAD_BYTES,
+)
 
 
 class IngestAdapter(Protocol):
@@ -43,19 +49,19 @@ class EnvelopeWriter:
     staging_root: str
     require_aof_fsync: bool = False
     aof_fsync_timeout_ms: int = 5000
+    max_raw_payload_bytes: int = MAX_RAW_PAYLOAD_BYTES
+    max_envelope_bytes: int = MAX_ENVELOPE_BYTES
 
     def __post_init__(self) -> None:
         self._cursor = CursorStore(self.conn)
         Path(self.staging_root).mkdir(parents=True, exist_ok=True)
 
-    def _write_raw(self, payload: dict) -> str:
-        from datetime import datetime, timezone
+    def _write_encoded(self, encoded: bytes, *, root: Path | None = None) -> str:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        day_dir = Path(self.staging_root) / day
+        day_dir = (root or Path(self.staging_root)) / day
         day_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = day_dir / f"{uuid.uuid4().hex}.json"
         temporary = day_dir / f".{path.name}.tmp"
-        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(descriptor, "wb") as handle:
@@ -72,6 +78,56 @@ class EnvelopeWriter:
             temporary.unlink(missing_ok=True)
             raise
         return str(path)
+
+    def _write_raw(self, encoded: bytes) -> str:
+        return self._write_encoded(encoded)
+
+    def _quarantine_before_publish(
+        self,
+        env: Envelope,
+        *,
+        reason: str,
+        encoded_payload: bytes,
+        cursor: str,
+    ) -> None:
+        from tradingagents.persistence.store import insert_ingest_quarantine
+
+        observed = datetime.now(timezone.utc).isoformat()
+        digest = hashlib.sha256(encoded_payload).hexdigest()
+        quarantine_id = hashlib.sha256(
+            f"{self.source}\0{env.external_id}\0{cursor}\0{reason}".encode("utf-8")
+        ).hexdigest()
+        metadata = json.dumps(
+            {
+                "reason": reason,
+                "byte_count": len(encoded_payload),
+                "sha256": digest,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        quarantine_root = Path(self.staging_root).parent / "quarantine"
+        raw_path = self._write_encoded(metadata, root=quarantine_root)
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            insert_ingest_quarantine(
+                self.conn,
+                quarantine_id=quarantine_id,
+                source=self.source,
+                external_id=env.external_id or None,
+                observed_ts=observed,
+                reason_codes=[reason],
+                raw_path=raw_path,
+                envelope_sha256=digest,
+                byte_count=len(encoded_payload),
+                details={"stage": "adapter_pre_publish"},
+                commit=False,
+            )
+            self._cursor.set(self.source, cursor, commit=False)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            Path(raw_path).unlink(missing_ok=True)
+            raise
 
     async def _require_stream_fsync(self) -> None:
         """Wait until the local Redis AOF contains the preceding XADD.
@@ -104,8 +160,30 @@ class EnvelopeWriter:
         *,
         raw_payload: dict,
         cursor: str,
-    ) -> None:
-        raw_path = self._write_raw(raw_payload)
+    ) -> bool:
+        """Publish one bounded envelope; return False when quarantined locally."""
+        encoded_payload = json.dumps(
+            raw_payload, ensure_ascii=False, default=str
+        ).encode("utf-8")
+        if len(encoded_payload) > self.max_raw_payload_bytes:
+            self._quarantine_before_publish(
+                env,
+                reason="raw_payload_too_large",
+                encoded_payload=encoded_payload,
+                cursor=cursor,
+            )
+            return False
+        envelope_bytes = len(env.to_json().encode("utf-8"))
+        if envelope_bytes > self.max_envelope_bytes:
+            self._quarantine_before_publish(
+                env,
+                reason="envelope_too_large",
+                encoded_payload=encoded_payload,
+                cursor=cursor,
+            )
+            return False
+
+        raw_path = self._write_raw(encoded_payload)
         # Envelope dataclass is frozen — rebuild with the real raw_path.
         env_with_path = Envelope(
             source=env.source, ingested_ts=env.ingested_ts,
@@ -115,3 +193,4 @@ class EnvelopeWriter:
         await self.redis.xadd(self.stream, env_with_path.to_redis_fields())
         await self._require_stream_fsync()
         self._cursor.set(self.source, cursor)
+        return True

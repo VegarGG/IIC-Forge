@@ -45,8 +45,8 @@ def test_fresh_database_records_all_packaged_migrations(tmp_path):
     migrations = db._load_migrations()
     rows = _migration_rows(path)
 
-    assert len(migrations) == 4
-    assert len(rows) == 4
+    assert len(migrations) == 5
+    assert len(rows) == 5
     assert rows[0]["version"] == migrations[0].version == 1
     assert rows[0]["name"] == migrations[0].name == "baseline"
     assert rows[0]["checksum"] == migrations[0].checksum
@@ -61,6 +61,9 @@ def test_fresh_database_records_all_packaged_migrations(tmp_path):
     assert rows[3]["version"] == migrations[3].version == 4
     assert rows[3]["name"] == migrations[3].name == "delivery_outbox_controls"
     assert rows[3]["checksum"] == migrations[3].checksum
+    assert rows[4]["version"] == migrations[4].version == 5
+    assert rows[4]["name"] == migrations[4].name == "quality_security_budget"
+    assert rows[4]["checksum"] == migrations[4].checksum
 
 
 @pytest.mark.unit
@@ -70,7 +73,7 @@ def test_reconnect_verifies_without_creating_another_backup(tmp_path):
     db.connect(str(path)).close()
 
     assert not (tmp_path / "migration-backups").exists()
-    assert len(_migration_rows(path)) == 4
+    assert len(_migration_rows(path)) == 5
 
 
 @pytest.mark.unit
@@ -121,7 +124,7 @@ def test_concurrent_fresh_bootstrap_is_serialized(tmp_path):
         try:
             return (
                 conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-                == 4
+                == 5
             )
         finally:
             conn.close()
@@ -130,7 +133,7 @@ def test_concurrent_fresh_bootstrap_is_serialized(tmp_path):
         results = list(executor.map(lambda _index: _bootstrap(), range(8)))
 
     assert results == [True] * 8
-    assert len(_migration_rows(path)) == 4
+    assert len(_migration_rows(path)) == 5
     assert not (tmp_path / "migration-backups").exists()
 
 
@@ -156,7 +159,7 @@ def test_database_newer_than_application_is_refused(tmp_path):
     conn.execute(
         "INSERT INTO schema_migrations "
         "(version, name, checksum, applied_ts, app_version) "
-        "VALUES (5, 'future', ?, '2026-08-08T00:00:00Z', 'future')",
+        "VALUES (6, 'future', ?, '2026-08-08T00:00:00Z', 'future')",
         ("f" * 64,),
     )
     conn.commit()
@@ -173,7 +176,7 @@ def test_applied_migration_history_gap_is_refused(tmp_path):
     conn.execute(
         "INSERT INTO schema_migrations "
         "(version, name, checksum, applied_ts, app_version) "
-        "VALUES (6, 'gap', ?, '2026-08-08T00:00:00Z', 'test')",
+        "VALUES (7, 'gap', ?, '2026-08-08T00:00:00Z', 'test')",
         ("f" * 64,),
     )
     conn.commit()
@@ -231,7 +234,7 @@ def test_packaged_queue_migration_upgrades_v1_with_verified_backup(
     finally:
         upgraded.close()
 
-    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4]
+    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4, 5]
     backups = sorted((tmp_path / "migration-backups").glob("*.db"))
     assert len(backups) == 1
     assert "pre-v0002" in backups[0].name
@@ -269,7 +272,7 @@ def test_process_worker_migration_upgrades_v2_with_verified_backup(
     finally:
         upgraded.close()
 
-    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4]
+    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4, 5]
     backups = sorted((tmp_path / "migration-backups").glob("*.db"))
     assert len(backups) == 1
     assert "pre-v0003" in backups[0].name
@@ -326,7 +329,7 @@ def test_delivery_outbox_migration_upgrades_v3_with_verified_backup(
     finally:
         upgraded.close()
 
-    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4]
+    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4, 5]
     backups = sorted((tmp_path / "migration-backups").glob("*.db"))
     assert len(backups) == 1
     assert "pre-v0004" in backups[0].name
@@ -340,7 +343,7 @@ def test_successful_pending_migration_is_backed_up_and_recorded(tmp_path, monkey
 
     migrations = db._load_migrations()
     pending = db.Migration.from_sql(
-        5,
+        6,
         "upgrade_probe",
         """
 CREATE TABLE migration_probe (
@@ -365,10 +368,10 @@ END;
     )
     upgraded.close()
 
-    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4, 5]
+    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4, 5, 6]
     backups = sorted((tmp_path / "migration-backups").glob("*.db"))
     assert len(backups) == 1
-    assert "pre-v0005" in backups[0].name
+    assert "pre-v0006" in backups[0].name
     checksum_path = Path(f"{backups[0]}.sha256")
     assert checksum_path.is_file()
     assert stat.S_IMODE((tmp_path / "migration-backups").stat().st_mode) == 0o700
@@ -387,7 +390,7 @@ END;
             previous.execute(
                 "SELECT version FROM schema_migrations ORDER BY version DESC"
             ).fetchone()[0]
-            == 4
+            == 5
         )
     finally:
         previous.close()
@@ -399,7 +402,7 @@ def test_concurrent_pending_migration_runs_once(tmp_path, monkeypatch):
     db.connect(str(path)).close()
     migrations = db._load_migrations()
     pending = db.Migration.from_sql(
-        5,
+        6,
         "concurrent_probe",
         "CREATE TABLE concurrent_probe (id INTEGER PRIMARY KEY);\n",
     )
@@ -409,7 +412,7 @@ def test_concurrent_pending_migration_runs_once(tmp_path, monkeypatch):
         conn = db.connect(str(path))
         try:
             return conn.execute(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version=5"
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=6"
             ).fetchone()[0]
         finally:
             conn.close()
@@ -418,7 +421,7 @@ def test_concurrent_pending_migration_runs_once(tmp_path, monkeypatch):
         results = list(executor.map(lambda _index: _upgrade(), range(4)))
 
     assert results == [1] * 4
-    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4, 5]
+    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4, 5, 6]
     assert len(list((tmp_path / "migration-backups").glob("*.db"))) == 1
 
 
@@ -429,7 +432,7 @@ def test_forced_fresh_bootstrap_failure_rolls_back_every_schema_object(
     path = tmp_path / "iic.db"
     migrations = db._load_migrations()
     forced = db.Migration.from_sql(
-        5,
+        6,
         "forced_fresh_failure",
         """
 CREATE TABLE fresh_probe (id INTEGER PRIMARY KEY);
@@ -455,7 +458,7 @@ INSERT INTO table_that_does_not_exist (id) VALUES (1);
 
     monkeypatch.setattr(db, "_load_migrations", lambda: migrations)
     db.connect(str(path)).close()
-    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4]
+    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4, 5]
 
 
 @pytest.mark.unit
@@ -465,7 +468,7 @@ def test_forced_migration_failure_rolls_back_and_keeps_backup(tmp_path, monkeypa
 
     migrations = db._load_migrations()
     forced = db.Migration.from_sql(
-        5,
+        6,
         "forced_failure",
         """
 CREATE TABLE migration_probe (id INTEGER PRIMARY KEY);
@@ -485,7 +488,7 @@ INSERT INTO table_that_does_not_exist (id) VALUES (1);
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-        assert versions == [1, 2, 3, 4]
+        assert versions == [1, 2, 3, 4, 5]
         assert (
             check.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='migration_probe'"
@@ -498,7 +501,7 @@ INSERT INTO table_that_does_not_exist (id) VALUES (1);
 
     backups = sorted((tmp_path / "migration-backups").glob("*.db"))
     assert len(backups) == 1
-    assert "pre-v0005" in backups[0].name
+    assert "pre-v0006" in backups[0].name
     assert Path(f"{backups[0]}.sha256").is_file()
 
 
@@ -516,7 +519,7 @@ def test_pending_migration_refuses_foreign_key_corruption(tmp_path, monkeypatch)
     corrupt.close()
 
     migrations = db._load_migrations()
-    pending = db.Migration.from_sql(5, "safe_probe", "CREATE TABLE safe_probe (id);\n")
+    pending = db.Migration.from_sql(6, "safe_probe", "CREATE TABLE safe_probe (id);\n")
     monkeypatch.setattr(db, "_load_migrations", lambda: migrations + (pending,))
 
     with pytest.raises(db.MigrationPreflightError, match="foreign_key_check"):
@@ -530,14 +533,14 @@ def test_pending_migration_requires_backup_capacity(tmp_path, monkeypatch):
     path = tmp_path / "iic.db"
     db.connect(str(path)).close()
     migrations = db._load_migrations()
-    pending = db.Migration.from_sql(5, "safe_probe", "CREATE TABLE safe_probe (id);\n")
+    pending = db.Migration.from_sql(6, "safe_probe", "CREATE TABLE safe_probe (id);\n")
     monkeypatch.setattr(db, "_load_migrations", lambda: migrations + (pending,))
     monkeypatch.setattr(db.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
 
     with pytest.raises(db.MigrationPreflightError, match="insufficient free space"):
         db.connect(str(path))
 
-    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4]
+    assert [row["version"] for row in _migration_rows(path)] == [1, 2, 3, 4, 5]
     assert not list((tmp_path / "migration-backups").glob("*.db"))
 
 

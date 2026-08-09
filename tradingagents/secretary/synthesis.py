@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from tradingagents.security.untrusted import render_untrusted_payload
+
 
 # STABLE prefix: the fully-static rubric (role + section instructions + ##
 # headings) is byte-identical across every call, so it must come FIRST for
@@ -45,7 +47,14 @@ def build_synthesis_prompt(*, ticker: str, persona_runs: List[Dict[str, Any]]) -
         pid = r.get("persona_id", "?")
         decision = r.get("decision", "?")
         body = r.get("final_trade_decision", "")
-        blocks.append(f"=== {pid} ({decision}) ===\n{body}\n")
+        blocks.append(
+            render_untrusted_payload(
+                "persona_report",
+                body,
+                metadata={"persona_id": pid, "decision": decision},
+                max_chars=20_000,
+            )
+        )
     persona_reports = "\n".join(blocks)
     return (
         _SYNTHESIS_TEMPLATE
@@ -82,9 +91,13 @@ def synthesize_brief(
         # rubric prefix stays byte-identical across calls for prompt caching.
         prompt = (
             prompt
-            + f"\nTRIGGER EVENT for {ticker}:\n\n{event_context}\n\n"
-            + f"Synthesize the three persona reports above into a terse "
-            + f"consensus / divergence / recommendation for this event.\n"
+            + f"\nTRIGGER EVENT for {ticker}:\n\n"
+            + render_untrusted_payload(
+                "trigger_event", event_context, max_chars=20_000
+            )
+            + "\n\n"
+            + "Synthesize the three persona reports above into a terse "
+            + "consensus / divergence / recommendation for this event.\n"
         )
     response = llm.invoke(prompt)
     raw = getattr(response, "content", str(response))

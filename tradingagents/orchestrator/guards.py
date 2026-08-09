@@ -15,6 +15,10 @@ import logging
 import sqlite3
 
 from tradingagents.orchestrator import queue_store
+from tradingagents.llm_clients.daily_budget import (
+    beijing_budget_date,
+    daily_budget_total,
+)
 
 
 log = logging.getLogger(__name__)
@@ -64,21 +68,34 @@ class QueueRateGuard:
 
 
 class DailyBudgetGuard:
-    """Worker-side. Blocks new dispatch when SUM(cost_usd) today >= daily_usd."""
+    """Worker pre-gate backed by the same cross-process paid-call ledger."""
 
-    def __init__(self, *, enabled: bool, daily_usd: float) -> None:
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        daily_usd: float,
+        timezone_name: str = "Asia/Shanghai",
+        reservation_usd: float = 1.0,
+    ) -> None:
         self.enabled = enabled
         self.daily_usd = daily_usd
+        self.timezone_name = timezone_name
+        self.reservation_usd = reservation_usd
 
     def gate(self, conn: sqlite3.Connection) -> bool:
-        total = queue_store.daily_cost_total(conn)
+        budget_date = beijing_budget_date(timezone_name=self.timezone_name)
+        total = daily_budget_total(conn, budget_date=budget_date)
         if not self.enabled:
             log.debug("daily_cost_usd=%.4f (budget guard disabled)", total)
             return True
-        if total >= self.daily_usd:
+        if total + self.reservation_usd > self.daily_usd + 1e-9:
             log.warning(
-                "daily budget guard: $%.2f spent today >= $%.2f limit",
-                total, self.daily_usd,
+                "daily budget guard: $%.2f charged/reserved plus $%.2f next "
+                "reservation exceeds $%.2f limit",
+                total,
+                self.reservation_usd,
+                self.daily_usd,
             )
             return False
         return True

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tradingagents.security.untrusted import render_untrusted_payload
+
 
 def render_pack_for_followup(pack: dict[str, Any], *, max_chars: int = 12000) -> str:
     content = pack["content"]
@@ -25,4 +27,8 @@ def render_pack_for_followup(pack: dict[str, Any], *, max_chars: int = 12000) ->
             f"## {item.get('persona_id', 'analysis')} {item.get('decision', '')}",
             item.get("body", ""),
         ]
-    return "\n".join(lines)[:max_chars]
+    return render_untrusted_payload(
+        "prior_analysis_pack",
+        "\n".join(lines),
+        max_chars=max_chars,
+    )

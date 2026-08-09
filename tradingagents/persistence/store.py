@@ -173,6 +173,44 @@ def insert_event(
         conn.commit()
 
 
+def insert_ingest_quarantine(
+    conn: sqlite3.Connection,
+    *,
+    quarantine_id: str,
+    source: str,
+    external_id: Optional[str],
+    observed_ts: str,
+    reason_codes: Iterable[str],
+    warning_codes: Iterable[str] = (),
+    raw_path: Optional[str] = None,
+    envelope_sha256: str,
+    byte_count: Optional[int] = None,
+    details: Optional[dict] = None,
+    commit: bool = True,
+) -> None:
+    """Persist non-sensitive metadata for input rejected before triage."""
+    conn.execute(
+        "INSERT OR IGNORE INTO ingest_quarantine ("
+        "quarantine_id, source, external_id, observed_ts, reason_codes, "
+        "warning_codes, raw_path, envelope_sha256, byte_count, details"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            quarantine_id,
+            source,
+            external_id,
+            observed_ts,
+            json.dumps(list(reason_codes), sort_keys=True),
+            json.dumps(list(warning_codes), sort_keys=True),
+            raw_path,
+            envelope_sha256,
+            byte_count,
+            json.dumps(details or {}, sort_keys=True),
+        ),
+    )
+    if commit:
+        conn.commit()
+
+
 def insert_event_ticker(
     conn: sqlite3.Connection,
     *,

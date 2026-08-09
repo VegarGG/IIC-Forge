@@ -10,6 +10,7 @@ Defensive: catches all requests errors; never raises out of stream().
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import sqlite3
@@ -21,6 +22,7 @@ import requests
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
 from tradingagents.sensing.envelope import Envelope
+from tradingagents.security.untrusted import normalize_untrusted_text
 
 
 log = logging.getLogger(__name__)
@@ -81,27 +83,42 @@ class PolygonNewsAdapter:
             log.warning("polygon poll failed (will retry): %s", e)
             return 0
 
+        if not isinstance(data, dict) or not isinstance(data.get("results", []), list):
+            log.warning("polygon response rejected: results must be a list")
+            return 0
+
         writer = EnvelopeWriter(source=NAME, redis=redis, conn=conn,
                                  stream=self._stream, staging_root=self._staging,
                                  require_aof_fsync=self._require_aof_fsync,
                                  aof_fsync_timeout_ms=self._aof_fsync_timeout_ms)
         emitted = 0
-        for item in data.get("results", []):
+        items = [item for item in data.get("results", []) if isinstance(item, dict)]
+        items.sort(key=lambda item: str(item.get("published_utc") or ""))
+        for item in items:
             published = item.get("published_utc", "")
             if not published or published <= cursor:
                 continue
-            ext_id = f"pn:{item.get('id', '')}"
-            text = " ".join(filter(None, [item.get("title", ""), item.get("description", "")]))
+            raw_text = " ".join(
+                filter(None, [item.get("title", ""), item.get("description", "")])
+            )
+            text, _ = normalize_untrusted_text(raw_text, max_chars=20_000)
+            stable_id = str(item.get("id") or "")
+            if not stable_id:
+                stable_id = hashlib.sha256(
+                    f"{published}\0{text}".encode("utf-8")
+                ).hexdigest()
+            ext_id = f"pn:{stable_id}"
             env = Envelope(
                 source=NAME,
                 ingested_ts=datetime.now(timezone.utc).isoformat(),
                 external_id=ext_id, text=text,
                 source_tags={"tickers": item.get("tickers", []),
-                             "publisher": (item.get("publisher") or {}).get("name", "")},
+                             "publisher": (item.get("publisher") or {}).get("name", ""),
+                             "published_ts": published},
                 raw_path="",
             )
-            await writer.write(env, raw_payload=item, cursor=published)
-            emitted += 1
+            if await writer.write(env, raw_payload=item, cursor=published):
+                emitted += 1
         return emitted
 
     async def stream(self, *, redis: aioredis.Redis, conn: sqlite3.Connection) -> None:

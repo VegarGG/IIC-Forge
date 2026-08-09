@@ -19,7 +19,7 @@ class CursorStore:
         ).fetchone()
         return row["cursor"] if row else None
 
-    def set(self, source: str, cursor: str) -> None:
+    def set(self, source: str, cursor: str, *, commit: bool = True) -> None:
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             "INSERT INTO ingest_cursor (source, cursor, updated_ts) "
@@ -28,4 +28,5 @@ class CursorStore:
             "updated_ts = excluded.updated_ts",
             (source, cursor, now),
         )
-        self._conn.commit()
+        if commit:
+            self._conn.commit()

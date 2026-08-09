@@ -59,6 +59,7 @@ def run_one_ticker(
         provider=config["llm_provider"],
         model=config["deep_think_llm"],
         base_url=config.get("backend_url"),
+        budget_config=config,
     ).get_llm()
     synthesis = synthesize_brief(llm=llm, ticker=ticker, persona_runs=persona_runs)
     return run_ids, synthesis

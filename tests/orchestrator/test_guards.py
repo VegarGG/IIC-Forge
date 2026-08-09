@@ -91,13 +91,21 @@ def test_budget_disabled_never_blocks(conn):
 @pytest.mark.unit
 def test_budget_enabled_blocks_after_threshold(conn):
     from tradingagents.orchestrator.guards import DailyBudgetGuard
+    from tradingagents.llm_clients.daily_budget import beijing_budget_date
+
     g = DailyBudgetGuard(enabled=True, daily_usd=5.00)
-    # Accumulate $5 of completed work
+    budget_date = beijing_budget_date()
+    # Accumulate $5 across paid calls, independent of queue-job boundaries.
     for _ in range(5):
-        qs.insert_queue_job(conn, job_type="event_alert",
-                            payload="{}", trigger_event_id="ev1")
-        job = qs.lease_one(conn)
-        qs.mark_done(conn, job_id=job["job_id"], run_ids=[],
-                     brief_id=None, cost_usd=1.0,
-                     lease_token=job["lease_token"])
+        call_id = f"call-{_}"
+        conn.execute(
+            "INSERT INTO llm_budget_ledger ("
+            "call_id, budget_date, budget_timezone, provider, model, state, "
+            "reserved_usd, actual_usd, created_ts, settled_ts) "
+            "VALUES (?, ?, 'Asia/Shanghai', 'deepseek', 'deepseek-v4-pro', "
+            "'settled', 1.0, 1.0, '2026-08-09T00:00:00Z', "
+            "'2026-08-09T00:00:01Z')",
+            (call_id, budget_date),
+        )
+    conn.commit()
     assert g.gate(conn) is False

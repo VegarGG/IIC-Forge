@@ -129,4 +129,7 @@ def test_trading_graph_seeds_event_context_into_initial_state(monkeypatch, tmp_p
     if propagate_err is not None:
         print(f"\n[debug] propagate raised: {type(propagate_err).__name__}: {propagate_err}")
 
-    assert captured.get("event_context_text") == "Apple beats Q3 earnings by 12%."
+    protected = captured.get("event_context_text", "")
+    assert "SECURITY BOUNDARY" in protected
+    assert '"content": "Apple beats Q3 earnings by 12%."' in protected
+    assert captured["messages"][-1][1] == protected

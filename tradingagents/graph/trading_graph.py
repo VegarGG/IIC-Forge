@@ -106,12 +106,14 @@ class TradingAgentsGraph:
             provider=self.config["llm_provider"],
             model=self.config["deep_think_llm"],
             base_url=self.config.get("backend_url"),
+            budget_config=self.config,
             **deep_kwargs,
         )
         quick_client = create_llm_client(
             provider=self.config["llm_provider"],
             model=self.config["quick_think_llm"],
             base_url=self.config.get("backend_url"),
+            budget_config=self.config,
             **quick_kwargs,
         )
 
@@ -416,7 +418,17 @@ class TradingAgentsGraph:
             logger.warning(init_agent_state["market_snapshot_error"])
         # IIC-FORGE F4: event-context injection — seed event text into state.
         # Empty string when not in event_alert mode (deep-dive path unchanged).
-        init_agent_state["event_context_text"] = self.config.get("event_context", "") or ""
+        raw_event_context = self.config.get("event_context", "") or ""
+        if raw_event_context:
+            from tradingagents.security.untrusted import render_untrusted_payload
+
+            safe_event_context = render_untrusted_payload(
+                "trigger_event", raw_event_context, max_chars=20_000
+            )
+            init_agent_state["event_context_text"] = safe_event_context
+            init_agent_state["messages"].append(("human", safe_event_context))
+        else:
+            init_agent_state["event_context_text"] = ""
         if self.config.get("prior_analysis_pack"):
             from tradingagents.analysis_pack.prompting import render_pack_for_followup
             init_agent_state["prior_analysis_pack_context"] = render_pack_for_followup(

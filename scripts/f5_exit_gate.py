@@ -132,17 +132,26 @@ def _g8_cost_data(conn, since: str) -> tuple[bool, str]:
     return (row["days"] >= 3, f"{row['days']} days of cost data")
 
 
-def _g9_guards_off() -> tuple[bool, str]:
+def _g9_guard_policy() -> tuple[bool, str]:
     C = _dc.DEFAULT_CONFIG
-    keys = [
+    legacy_guards = [
         ("trigger_backpressure_enabled", C.get("trigger_backpressure_enabled")),
         ("trigger_daily_rate_enabled", C.get("trigger_daily_rate_enabled")),
-        ("daily_budget_enabled", C.get("daily_budget_enabled")),
         ("refinement_chain_budget.enabled", C["refinement_chain_budget"]["enabled"]),
         ("morning_digest_token_ceiling.enabled", C["morning_digest_token_ceiling"]["enabled"]),
     ]
-    on = [k for k, v in keys if v]
-    return (not on, f"guards on: {on or 'none'}")
+    unexpected = [key for key, enabled in legacy_guards if enabled]
+    paid_budget_ok = (
+        C.get("daily_budget_enabled") is True
+        and C.get("daily_budget_usd") == 20.0
+        and C.get("daily_budget_timezone") == "Asia/Shanghai"
+        and C.get("daily_budget_reservation_usd") == 1.0
+    )
+    return (
+        not unexpected and paid_budget_ok,
+        f"unexpected legacy guards: {unexpected or 'none'}; "
+        f"combined paid budget contract: {'ok' if paid_budget_ok else 'invalid'}",
+    )
 
 
 def evaluate(*, since: str | None = None, mode: str = "soak") -> dict:
@@ -165,7 +174,7 @@ def evaluate(*, since: str | None = None, mode: str = "soak") -> dict:
         ("G6", lambda: _g6_refinement(conn, query_since)),
         ("G7", lambda: _g7_no_crashes(query_since)),
         ("G8", lambda: _g8_cost_data(conn, query_since)),
-        ("G9", lambda: _g9_guards_off()),
+        ("G9", lambda: _g9_guard_policy()),
     ]:
         if mode == "evidence" and gid == "G7":
             checks[gid] = {

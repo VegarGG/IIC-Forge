@@ -9,10 +9,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
+
+
+class EnvelopeDecodeError(ValueError):
+    """A Redis envelope is malformed and must be quarantined, not retried."""
 
 
 def normalize_for_fingerprint(text: str) -> str:
@@ -37,7 +41,21 @@ class Envelope:
 
     @classmethod
     def from_json(cls, blob: str) -> "Envelope":
-        return cls(**json.loads(blob))
+        try:
+            payload = json.loads(blob)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise EnvelopeDecodeError("envelope data is not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise EnvelopeDecodeError("envelope JSON must be an object")
+        required = {"source", "ingested_ts", "external_id", "text", "source_tags", "raw_path"}
+        if set(payload) != required:
+            raise EnvelopeDecodeError("envelope JSON fields do not match the contract")
+        scalar_fields = ("source", "ingested_ts", "external_id", "text", "raw_path")
+        if any(not isinstance(payload[field], str) for field in scalar_fields):
+            raise EnvelopeDecodeError("envelope scalar fields must be strings")
+        if not isinstance(payload["source_tags"], dict):
+            raise EnvelopeDecodeError("envelope source_tags must be an object")
+        return cls(**payload)
 
     def to_redis_fields(self) -> Dict[str, str]:
         # One field carries the whole JSON. Keeps XADD payload simple and avoids
@@ -45,9 +63,15 @@ class Envelope:
         return {"data": self.to_json()}
 
     @classmethod
-    def from_redis_fields(cls, fields: Dict[str, str]) -> "Envelope":
+    def from_redis_fields(
+        cls, fields: Mapping[str | bytes, str | bytes]
+    ) -> "Envelope":
         # Redis returns bytes when decode_responses=False; tolerate both.
-        data = fields.get("data") or fields.get(b"data")
+        data = fields.get("data")
+        if data is None:
+            data = fields.get(b"data")
         if isinstance(data, bytes):
             data = data.decode("utf-8")
+        if not isinstance(data, str):
+            raise EnvelopeDecodeError("Redis envelope is missing string field 'data'")
         return cls.from_json(data)
