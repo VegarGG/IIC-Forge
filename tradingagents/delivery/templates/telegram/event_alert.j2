@@ -1,10 +1,10 @@
-⚡ *Event Alert* — {{ scope }}
+⚡ Event Alert — {{ scope }}
 {% if trigger_event -%}
 {{ trigger_event.summary | truncate(180) }}
 {% endif %}
 
 {% for t in tickers -%}
-*{{ t.ticker }}*: {{ t.recommendation | truncate(120) }}
+{{ t.ticker }}: {{ t.recommendation | truncate(120) }}
 {% endfor %}
 
-_brief: `{{ brief_id }}`_
+brief: {{ brief_id }}

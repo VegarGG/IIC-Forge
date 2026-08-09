@@ -58,18 +58,26 @@ def _resolve_brief_id(conn, brief_id: str) -> str:
 
 
 def _transition(conn, brief_id: str, ticker, state: str) -> int:
+    now = _utc_now_iso()
+    store.expire_lapsed_actions(conn, now_iso=now)
     rows = conn.execute(
         "SELECT action_id, action_params FROM brief_actions "
-        "WHERE brief_id = ? AND action_type = 'run_full_study' AND state = 'pending'",
-        (brief_id,),
+        "WHERE brief_id = ? AND action_type = 'run_full_study' AND state = 'pending' "
+        "AND datetime(expires_at) > datetime(?)",
+        (brief_id, now),
     ).fetchall()
     n = 0
     for r in rows:
         t = json.loads(r["action_params"]).get("ticker")
         if ticker is None or ticker.upper() == t:
-            store.update_action_state(conn, action_id=r["action_id"],
-                                      state=state, responded_at=_utc_now_iso())
-            n += 1
+            n += int(
+                store.respond_to_pending_action(
+                    conn,
+                    action_id=r["action_id"],
+                    state=state,
+                    responded_at=now,
+                )
+            )
     return n
 
 

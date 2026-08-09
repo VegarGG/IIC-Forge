@@ -68,6 +68,7 @@ def drain_one(
                 error=f"unknown delivery channel: {job['channel']}",
                 delivery_id=None,
                 retryable=False,
+                error_category="unknown_channel",
                 now=current,
             )
             return True
@@ -106,6 +107,11 @@ def drain_one(
 
         retryable = attempt["status"] == "failed"
         detail = attempt["channel_ref"] or attempt["skip_reason"] or attempt["status"]
+        error_category = (
+            "transport_error"
+            if retryable
+            else (attempt["skip_reason"] or "delivery_blocked")
+        )
         state = queue_store.mark_failure(
             conn,
             delivery_job_id=job["delivery_job_id"],
@@ -115,6 +121,7 @@ def drain_one(
             retry_base_seconds=int(delivery_cfg["queue_retry_base_seconds"]),
             retry_cap_seconds=int(delivery_cfg["queue_retry_cap_seconds"]),
             retryable=retryable,
+            error_category=str(error_category),
             now=current,
         )
         log.warning(
@@ -137,11 +144,10 @@ def drain_one(
             retry_base_seconds=int(delivery_cfg["queue_retry_base_seconds"]),
             retry_cap_seconds=int(delivery_cfg["queue_retry_cap_seconds"]),
             retryable=True,
+            error_category="worker_runtime",
             now=current,
         )
-        log.exception(
-            "delivery job %d failed; state=%s", job["delivery_job_id"], state
-        )
+        log.exception("delivery job %d failed; state=%s", job["delivery_job_id"], state)
     return True
 
 

@@ -33,7 +33,9 @@ def _expires_at(hours: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
 
 
-def _apply_run_full_study(conn: sqlite3.Connection, *, brief_id: str, arg: str) -> None:
+def _apply_run_full_study(
+    conn: sqlite3.Connection, *, brief_id: str, arg: str, now_iso: str
+) -> int:
     """Transition run_full_study actions for a light brief.
 
     arg is a ticker (accept that one), '__all__' (accept all pending), or
@@ -42,10 +44,11 @@ def _apply_run_full_study(conn: sqlite3.Connection, *, brief_id: str, arg: str) 
     ticker comparison so a literal ticker can never collide with them."""
     rows = conn.execute(
         "SELECT action_id, action_params FROM brief_actions "
-        "WHERE brief_id = ? AND action_type = 'run_full_study' AND state = 'pending'",
-        (brief_id,),
+        "WHERE brief_id = ? AND action_type = 'run_full_study' AND state = 'pending' "
+        "AND datetime(expires_at) > datetime(?)",
+        (brief_id, now_iso),
     ).fetchall()
-    now = _utc_now_iso()
+    changed = 0
     for r in rows:
         ticker = json.loads(r["action_params"]).get("ticker")
         if arg == "__all__":
@@ -56,9 +59,29 @@ def _apply_run_full_study(conn: sqlite3.Connection, *, brief_id: str, arg: str) 
             new_state = "accepted"
         else:
             continue
-        store.update_action_state(
-            conn, action_id=r["action_id"], state=new_state, responded_at=now,
+        changed += int(
+            store.respond_to_pending_action(
+                conn,
+                action_id=r["action_id"],
+                state=new_state,
+                responded_at=now_iso,
+            )
         )
+    return changed
+
+
+def _answer_callback(update: Any, *, text: str) -> None:
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                update.callback_query.answer(text=text),
+                loop,
+            )
+        else:
+            loop.run_until_complete(update.callback_query.answer(text=text))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def handle_callback(*, update: Any, conn: sqlite3.Connection) -> None:
@@ -68,49 +91,56 @@ def handle_callback(*, update: Any, conn: sqlite3.Connection) -> None:
     if len(parts) != 4 or parts[0] != "act":
         return
     _, brief_id, action_type, answer = parts
+    if action_type == "run_backtest" and answer not in {"yes", "no"}:
+        return
+    if action_type not in {"run_backtest", "run_full_study"}:
+        return
 
     chat_id = update.callback_query.message.chat.id
     message_id = update.callback_query.message.message_id
     channel_ref = f"{chat_id}:{message_id}"
     resolved = store.resolve_brief_id_by_channel_ref(
-        conn, channel="telegram", channel_ref=channel_ref,
+        conn,
+        channel="telegram",
+        channel_ref=channel_ref,
     )
     if resolved != brief_id:
         return
 
+    now = _utc_now_iso()
+    store.expire_lapsed_actions(conn, now_iso=now)
     if action_type == "run_full_study":
-        _apply_run_full_study(conn, brief_id=brief_id, arg=answer)
+        changed = _apply_run_full_study(
+            conn, brief_id=brief_id, arg=answer, now_iso=now
+        )
     else:
         state = "accepted" if answer == "yes" else "declined"
         pending = store.get_pending_action_by_brief(
-            conn, brief_id=brief_id, action_type=action_type,
+            conn,
+            brief_id=brief_id,
+            action_type=action_type,
         )
-        if pending is not None:
-            aid = pending["action_id"]
-        else:
-            expires = _expires_at(24)
-            aid = store.insert_brief_action(
-                conn, brief_id=brief_id, action_type=action_type,
-                action_params={}, expires_at=expires,
+        changed = int(
+            pending is not None
+            and store.respond_to_pending_action(
+                conn,
+                action_id=pending["action_id"],
+                state=state,
+                responded_at=now,
             )
-        store.update_action_state(
-            conn, action_id=aid, state=state, responded_at=_utc_now_iso(),
         )
 
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                update.callback_query.answer(text="OK"), loop,
-            )
-        else:
-            loop.run_until_complete(update.callback_query.answer(text="OK"))
-    except Exception:  # noqa: BLE001
-        pass
+    _answer_callback(
+        update,
+        text="OK" if changed else "Expired or already handled",
+    )
 
 
 def handle_message(
-    *, update: Any, conn: sqlite3.Connection, config: Dict[str, Any],
+    *,
+    update: Any,
+    conn: sqlite3.Connection,
+    config: Dict[str, Any],
 ) -> None:
     """Free-text reply → refine_brief action. Non-reply messages ignored (V1)."""
     reply_to = getattr(update.message, "reply_to_message", None)
@@ -120,26 +150,36 @@ def handle_message(
     message_id = reply_to.message_id
     channel_ref = f"{chat_id}:{message_id}"
     brief_id = store.resolve_brief_id_by_channel_ref(
-        conn, channel="telegram", channel_ref=channel_ref,
+        conn,
+        channel="telegram",
+        channel_ref=channel_ref,
     )
     if brief_id is None:
         return
     expires_hours = config["refinement"]["action_expires_hours"]
     expires = _expires_at(expires_hours)
     aid = store.insert_brief_action(
-        conn, brief_id=brief_id, action_type="refine_brief",
+        conn,
+        brief_id=brief_id,
+        action_type="refine_brief",
         action_params={"reply_text": update.message.text or ""},
         expires_at=expires,
     )
     store.update_action_state(
-        conn, action_id=aid, state="accepted", responded_at=_utc_now_iso(),
+        conn,
+        action_id=aid,
+        state="accepted",
+        responded_at=_utc_now_iso(),
     )
 
 
 def main() -> None:
     """Start the polling loop. Called by the systemd unit."""
     from telegram.ext import (
-        ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters,
+        ApplicationBuilder,
+        CallbackQueryHandler,
+        MessageHandler,
+        filters,
     )
     from tradingagents.default_config import DEFAULT_CONFIG
     from tradingagents.persistence.db import connect as iic_connect

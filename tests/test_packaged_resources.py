@@ -1,6 +1,6 @@
 from importlib.resources import files
 
-from tradingagents.delivery.render import _env as delivery_templates
+from tradingagents.delivery.render import _plain_env as delivery_templates
 from tradingagents.persistence.db import _load_migrations
 from tradingagents.personas.resolver import load_packaged_persona
 from tradingagents.secretary.service import _env as secretary_templates
@@ -12,6 +12,7 @@ def test_packaged_text_and_yaml_resources_are_readable():
         "baseline",
         "queue_lifecycle",
         "analysis_worker_process",
+        "delivery_outbox_controls",
     ]
     assert "CREATE TABLE" in migrations[0].sql
     persona = load_packaged_persona("balanced")
@@ -34,6 +35,7 @@ def test_packaged_jinja_templates_are_discoverable():
         "cli/event_alert_light.j2",
         "cli/morning_digest.j2",
         "email/deep_dive.j2",
+        "email/event_alert.j2",
         "email/event_alert_light.j2",
         "email/morning_digest.j2",
         "telegram/deep_dive.j2",

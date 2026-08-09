@@ -60,6 +60,30 @@ def test_forge_alert_approve_all(tmp_path, monkeypatch):
     assert states == ["accepted", "accepted"]
 
 
+@pytest.mark.unit
+def test_forge_alert_cannot_list_or_approve_expired_action(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_IIC_DB_PATH", str(tmp_path / "iic.db"))
+    conn = connect(str(tmp_path / "iic.db"))
+    _seed(conn)
+    conn.execute(
+        "UPDATE brief_actions SET expires_at = '2000-01-01T00:00:00+00:00'"
+    )
+    conn.commit()
+
+    from cli.forge import app
+
+    runner = CliRunner()
+    listed = runner.invoke(app, ["alert", "list"])
+    assert listed.exit_code == 0
+    assert "no pending alerts" in listed.stdout
+
+    approved = runner.invoke(app, ["alert", "approve", "lb1"])
+    assert approved.exit_code == 0
+    check = connect(str(tmp_path / "iic.db"))
+    states = [row[0] for row in check.execute("SELECT state FROM brief_actions")]
+    assert states == ["expired", "expired"]
+
+
 def _seed_full_id(conn, brief_id="fc293809d37445dfaf54d174176c5a1a"):
     """Seed a light alert with a realistic 32-char brief_id (like production)."""
     store.insert_event(conn, event_id="evx", source="rss",

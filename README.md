@@ -234,7 +234,7 @@ Notable tunables in `default_config.py`:
 | `alert_salience_threshold` / `alert_ticker_confidence_threshold` | `0.85` / `0.9` | how selective the alert trigger is |
 | `alert_pending_ttl_hours` | `24` | how long a pending approval stays valid |
 | `delivery.quiet_hours.timezone` | `Asia/Shanghai` | alert quiet-hours clock (22:00-07:00) |
-| `delivery.queue_max_attempts` | `5` | bounded Telegram/email attempts before `dead` |
+| `delivery.queue_max_attempts` | `5` | bounded transient Telegram/email attempts before `dead`; permanent config failures become `blocked` |
 | `worker_job_timeout_min` | `20` | hard wall-clock limit; the isolated analysis process is terminated before retry |
 | `worker_process_start_method` | `spawn` | clean child-process start method for every analysis attempt |
 | `queue_retry_base_seconds` / `queue_retry_cap_seconds` | `30` / `900` | bounded exponential retry delay for transient analysis failures |
@@ -242,6 +242,12 @@ Notable tunables in `default_config.py`:
 | `market_data_stale_after_seconds` | `900` | snapshot freshness TTL for same-day market data |
 | `market_data_cache_ttl_seconds` | `900` | same-day OHLCV cache TTL; historical cache files are reused |
 | cost / rate guards | `enabled=False` | coded but off through F0–F5 (measure first) |
+
+Alert delivery is a durable SQLite outbox. Inspect and operate it with
+`iic-forge forge delivery status|inspect|retry|requeue|cancel`; every manual
+state change requires an audit note. See
+[`ops/runbooks/production-readiness-batch-5.md`](ops/runbooks/production-readiness-batch-5.md)
+for lifecycle semantics and credentialed Telegram/SMTP field tests.
 
 ### Market Data Freshness
 

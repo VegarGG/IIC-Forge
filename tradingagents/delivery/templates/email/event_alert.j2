@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Event Alert — {{ scope }}</title></head>
+<body>
+  <h1>⚡ Event Alert — {{ scope }}</h1>
+  <p>Generated {{ generated_ts }} · brief <code>{{ brief_id }}</code></p>
+  {% if trigger_event %}<h2>Trigger</h2><p>{{ trigger_event.summary }}</p>{% endif %}
+  {% for t in tickers %}
+    <h2>{{ t.ticker }}</h2>
+    <p>{{ t.recommendation }}</p>
+  {% endfor %}
+</body>
+</html>

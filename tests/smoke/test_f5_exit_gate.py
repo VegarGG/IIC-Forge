@@ -20,7 +20,9 @@ from tradingagents.persistence import store
 def test_f5_end_to_end_synthetic(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_IIC_DB_PATH", str(tmp_path / "iic.db"))
     monkeypatch.setenv("TRADINGAGENTS_IIC_DATA_DIR", str(tmp_path / "data"))
-    import importlib, tradingagents.default_config as dc
+    import importlib
+    import tradingagents.default_config as dc
+
     importlib.reload(dc)
 
     conn = iic_connect(str(tmp_path / "iic.db"))
@@ -35,6 +37,13 @@ def test_f5_end_to_end_synthetic(tmp_path, monkeypatch):
         conn, brief_id="ev1", channel="telegram", status="sent",
         sent_ts="2026-05-27T12:00:01+00:00",
         channel_ref="12345:1", skip_reason=None,
+    )
+    store.insert_brief_action(
+        conn,
+        brief_id="ev1",
+        action_type="run_backtest",
+        action_params={},
+        expires_at="2099-01-01T00:00:00+00:00",
     )
 
     # 2. Simulate inline-button accept → brief_actions(accepted)

@@ -24,9 +24,11 @@ from tradingagents.persistence import store
 
 
 class DeliveryError(Exception):
-    """Raised by a channel's ``_send_impl`` for a non-transient send failure
-    (e.g. missing configuration). Caught by ``send()`` and recorded as a
-    'failed' delivery row, so it never crashes the delivery loop."""
+    """A permanent transport/configuration failure requiring operator action."""
+
+    def __init__(self, message: str, *, category: str = "configuration_error") -> None:
+        super().__init__(message)
+        self.category = category
 
 
 _QUIET_HOUR_MODES = {"event_alert", "event_alert_light"}
@@ -66,9 +68,7 @@ class DeliveryChannel(ABC):
                 brief_payload=brief,
                 body=body,
                 quiet_hours=self._config["delivery"]["quiet_hours"],
-                max_attempts=int(
-                    self._config["delivery"].get("queue_max_attempts", 5)
-                ),
+                max_attempts=int(self._config["delivery"].get("queue_max_attempts", 5)),
             )
         return self.send_attempt(brief=brief, mode=mode, body=body)
 
@@ -76,9 +76,7 @@ class DeliveryChannel(ABC):
         """Attempt transport now and append one immutable delivery audit row."""
         if mode in _QUIET_HOUR_MODES and is_quiet_hours(
             local_time=_local_now(
-                self._config["delivery"]["quiet_hours"].get(
-                    "timezone", "Asia/Shanghai"
-                )
+                self._config["delivery"]["quiet_hours"].get("timezone", "Asia/Shanghai")
             ),
             config=self._config["delivery"]["quiet_hours"],
         ):
@@ -111,6 +109,16 @@ class DeliveryChannel(ABC):
             if mode == "event_alert":
                 self._ensure_pending_action(brief["brief_id"])
             return delivery_id
+        except DeliveryError as exc:
+            return store.insert_delivery(
+                self._conn,
+                brief_id=brief["brief_id"],
+                channel=self.channel_name,
+                status="blocked",
+                sent_ts=None,
+                channel_ref=str(exc)[:500],
+                skip_reason=exc.category,
+            )
         except Exception as exc:  # noqa: BLE001
             return store.insert_delivery(
                 self._conn,

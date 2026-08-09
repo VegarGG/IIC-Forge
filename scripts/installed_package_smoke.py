@@ -10,7 +10,7 @@ from pathlib import Path
 
 import cli
 import tradingagents
-from tradingagents.delivery.render import _env as delivery_templates
+from tradingagents.delivery.render import _plain_env as delivery_templates
 from tradingagents.persistence.db import connect, schema_tables
 from tradingagents.personas.resolver import load_packaged_persona
 from tradingagents.secretary.service import _env as secretary_templates
@@ -45,6 +45,7 @@ def main() -> None:
     secretary_templates.get_template("deep_dive.j2")
     delivery_templates.get_template("telegram/morning_digest.j2")
     delivery_templates.get_template("email/deep_dive.j2")
+    delivery_templates.get_template("email/event_alert.j2")
 
     with tempfile.TemporaryDirectory(prefix="iic-forge-installed-smoke-") as tmp:
         conn = connect(str(Path(tmp) / "iic.db"))

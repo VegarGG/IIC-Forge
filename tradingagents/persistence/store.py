@@ -442,14 +442,12 @@ def count_brief_actions(conn: sqlite3.Connection, *, brief_id: str) -> int:
 def get_pending_action_by_brief(
     conn: sqlite3.Connection, *, brief_id: str, action_type: Optional[str] = None,
 ) -> Optional[dict]:
-    """Most recent pending brief_action for a brief (optionally by type).
-
-    Returns None when no pending action exists — callers fall back to inserting.
-    """
+    """Most recent unexpired pending action, optionally restricted by type."""
     if action_type is None:
         row = conn.execute(
             "SELECT * FROM brief_actions "
             "WHERE brief_id = ? AND state = 'pending' "
+            "AND datetime(expires_at) > datetime('now') "
             "ORDER BY action_id DESC LIMIT 1",
             (brief_id,),
         ).fetchone()
@@ -457,6 +455,7 @@ def get_pending_action_by_brief(
         row = conn.execute(
             "SELECT * FROM brief_actions "
             "WHERE brief_id = ? AND action_type = ? AND state = 'pending' "
+            "AND datetime(expires_at) > datetime('now') "
             "ORDER BY action_id DESC LIMIT 1",
             (brief_id, action_type),
         ).fetchone()
@@ -478,6 +477,7 @@ def fetch_pending_run_full_study(conn: sqlite3.Connection) -> list[dict]:
         "SELECT a.*, b.trigger_event_id, b.scope "
         "FROM brief_actions a JOIN briefs b ON b.brief_id = a.brief_id "
         "WHERE a.action_type = 'run_full_study' AND a.state = 'pending' "
+        "AND datetime(a.expires_at) > datetime('now') "
         "ORDER BY a.action_id",
     ).fetchall()
     return [dict(r) for r in rows]
@@ -504,6 +504,26 @@ def update_action_state(
         (state, responded_at, action_id),
     )
     conn.commit()
+
+
+def respond_to_pending_action(
+    conn: sqlite3.Connection,
+    *,
+    action_id: int,
+    state: str,
+    responded_at: str,
+) -> bool:
+    """Atomically accept/decline one still-pending, unexpired callback action."""
+    if state not in {"accepted", "declined"}:
+        raise ValueError("callback action state must be accepted or declined")
+    changed = conn.execute(
+        "UPDATE brief_actions SET state = ?, responded_at = ? "
+        "WHERE action_id = ? AND state = 'pending' "
+        "AND datetime(expires_at) > datetime(?)",
+        (state, responded_at, action_id, responded_at),
+    ).rowcount
+    conn.commit()
+    return changed == 1
 
 
 def mark_action_done(
@@ -563,13 +583,17 @@ def mark_full_study_action_done_for_job(
     conn.commit()
 
 
-def expire_lapsed_actions(conn: sqlite3.Connection) -> int:
+def expire_lapsed_actions(
+    conn: sqlite3.Connection, *, now_iso: Optional[str] = None
+) -> int:
+    current = now_iso or _now_iso()
     cur = conn.execute(
         "UPDATE brief_actions SET state = 'expired' "
         # datetime(expires_at) normalizes the ISO 'T'+offset string to SQLite's
         # space form so same-day expiries actually fire; a raw compare silently
         # never expires anything within the current year (S-8 hazard).
-        "WHERE state = 'pending' AND datetime(expires_at) < datetime('now')"
+        "WHERE state = 'pending' AND datetime(expires_at) <= datetime(?)",
+        (current,),
     )
     conn.commit()
     return cur.rowcount
