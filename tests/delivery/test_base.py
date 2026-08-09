@@ -1,4 +1,4 @@
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -49,7 +49,7 @@ def test_base_send_event_alert_during_quiet_hours_queues(tmp_path):
 
 
 @pytest.mark.unit
-def test_base_send_morning_digest_bypasses_quiet_hours(tmp_path):
+def test_base_send_morning_digest_uses_durable_quiet_hours_queue(tmp_path):
     from tradingagents.delivery.base import DeliveryChannel
 
     conn = iic_connect(str(tmp_path / "iic.db"))
@@ -59,13 +59,10 @@ def test_base_send_morning_digest_bypasses_quiet_hours(tmp_path):
         content_path="briefs/b2.md", run_ids=["r1"],
     )
 
-    captured = {}
-
     class Stub(DeliveryChannel):
         channel_name = "cli"
         def _send_impl(self, brief, mode, body):
-            captured["called"] = True
-            return ("cli", None)
+            raise AssertionError("queued digest must not call transport inline")
 
     cfg = {
         "delivery": {
@@ -74,12 +71,26 @@ def test_base_send_morning_digest_bypasses_quiet_hours(tmp_path):
         },
     }
 
-    with patch("tradingagents.delivery.base._local_now",
-               return_value=time(23, 30)):
+    with patch(
+        "tradingagents.delivery.queue_store._utc_now",
+        return_value=datetime(2026, 8, 8, 14, 30, tzinfo=timezone.utc),
+    ):
         ch = Stub(conn=conn, config=cfg)
-        ch.send(brief={"brief_id": "b2", "mode": "morning_digest"},
-                mode="morning_digest", body="...")
-    assert captured.get("called") is True
+        delivery_job_id = ch.send(
+            brief={"brief_id": "b2", "mode": "morning_digest"},
+            mode="morning_digest",
+            body="...",
+        )
+    row = conn.execute(
+        "SELECT mode, state, available_ts FROM delivery_queue "
+        "WHERE delivery_job_id = ?",
+        (delivery_job_id,),
+    ).fetchone()
+    assert tuple(row) == (
+        "morning_digest",
+        "queued",
+        "2026-08-08T23:00:00+00:00",
+    )
 
 
 @pytest.mark.unit

@@ -16,7 +16,6 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Sequence
 
@@ -45,6 +44,22 @@ class TriageResult:
     salience: Optional[float] = None
     deduped_of: Optional[str] = None
     matched_tickers: Sequence[str] = ()
+
+
+@dataclass
+class _PreparedRaw:
+    canonical_path: str
+    staging_path: Optional[Path]
+    canonical_file: Optional[Path]
+    consume_staging: bool
+
+    def commit(self) -> None:
+        if self.consume_staging and self.staging_path is not None:
+            self.staging_path.unlink(missing_ok=True)
+
+    def rollback(self) -> None:
+        if self.canonical_file is not None:
+            self.canonical_file.unlink(missing_ok=True)
 
 
 def _open_cross_thread_conn(db_path: str) -> sqlite3.Connection:
@@ -159,29 +174,73 @@ class Triage:
     def _new_event_id(self) -> str:
         return uuid.uuid4().hex
 
-    def _canonical_raw_path(self, event_id: str, src_staging_path: str,
-                            *, consume: bool = True) -> str:
-        """Canonicalize the staging raw file to ``events/<event_id>.json``.
+    def _prepare_raw_path(
+        self, event_id: str, src_staging_path: str, *, consume: bool = True
+    ) -> _PreparedRaw:
+        """Durably copy staging data before the corresponding SQLite commit.
 
-        ``consume=False`` COPIES instead of moving, leaving the staging file
-        in place.  The deferred path uses this: deferred events deliberately
-        skip dedupe recording so a redelivery is RE-SCORED — that redelivered
-        envelope still points at the staging path, which must therefore still
-        exist or the re-scored event ends up with raw_path="" (no raw text
-        for downstream compose).
+        The staging file is removed only after the database transaction
+        commits. A failed transaction removes the canonical copy but leaves
+        staging intact, so the pending Redis envelope can be retried without
+        losing its raw payload.
         """
         canonical_dir = Path(self._data_dir) / "events"
-        canonical_dir.mkdir(parents=True, exist_ok=True)
+        canonical_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         dst = canonical_dir / f"{event_id}.json"
+        if not src_staging_path:
+            return _PreparedRaw("", None, None, consume)
+        src = Path(src_staging_path)
+        if not src.is_file():
+            return _PreparedRaw("", None, None, consume)
+        temporary = canonical_dir / f".{dst.name}.{uuid.uuid4().hex}.tmp"
         try:
-            if consume:
-                shutil.move(src_staging_path, dst)
-            else:
-                shutil.copy2(src_staging_path, dst)
+            with src.open("rb") as source, temporary.open("xb") as target:
+                shutil.copyfileobj(source, target)
+                target.flush()
+                os.fsync(target.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, dst)
+            directory_fd = os.open(canonical_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         except FileNotFoundError:
-            # Staging file gone (test envelopes may not write one); leave path absent.
-            return ""
-        return str(dst)
+            temporary.unlink(missing_ok=True)
+            return _PreparedRaw("", None, None, consume)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            dst.unlink(missing_ok=True)
+            raise
+        return _PreparedRaw(str(dst), src, dst, consume)
+
+    def _insert_duplicate(
+        self, env: Envelope, *, deduped_of: str
+    ) -> TriageResult:
+        ev_id = self._new_event_id()
+        raw = self._prepare_raw_path(ev_id, env.raw_path)
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            insert_event(
+                self._conn,
+                event_id=ev_id,
+                source=env.source,
+                ingested_ts=env.ingested_ts,
+                salience=None,
+                raw_path=raw.canonical_path,
+                status="duplicate",
+                deduped_of=deduped_of,
+                commit=False,
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raw.rollback()
+            raise
+        raw.commit()
+        return TriageResult(
+            event_id=ev_id, status="duplicate", deduped_of=deduped_of
+        )
 
     def set_active_watchlist(self, tickers: Sequence[str]) -> None:
         self._watchlist = list(tickers)
@@ -192,32 +251,19 @@ class Triage:
         # Stage 1: hash / external_id dedupe.
         hit1 = await self._ds1.check(env)
         if hit1:
-            ev_id = self._new_event_id()
-            insert_event(
-                self._conn, event_id=ev_id, source=env.source,
-                ingested_ts=env.ingested_ts, salience=None,
-                raw_path=self._canonical_raw_path(ev_id, env.raw_path),
-                status="duplicate", deduped_of=hit1,
-            )
-            return TriageResult(event_id=ev_id, status="duplicate",
-                                deduped_of=hit1)
+            return self._insert_duplicate(env, deduped_of=hit1)
 
         # Stage 2: embedding cosine.  Dispatched to the single-thread executor
         # so that embedder.embed() (CPU-bound encode) runs off the event loop.
         loop = asyncio.get_running_loop()
+        packed_embedding = await loop.run_in_executor(
+            self._ds2_executor, self._ds2.embed, env.text
+        )
         hit2 = await loop.run_in_executor(
-            self._ds2_executor, self._ds2.check, env.text
+            self._ds2_executor, self._ds2.check_packed, packed_embedding
         )
         if hit2:
-            ev_id = self._new_event_id()
-            insert_event(
-                self._conn, event_id=ev_id, source=env.source,
-                ingested_ts=env.ingested_ts, salience=None,
-                raw_path=self._canonical_raw_path(ev_id, env.raw_path),
-                status="duplicate", deduped_of=hit2,
-            )
-            return TriageResult(event_id=ev_id, status="duplicate",
-                                deduped_of=hit2)
+            return self._insert_duplicate(env, deduped_of=hit2)
 
         # Score salience.
         score: SalienceResult = await self._scorer.score(
@@ -245,17 +291,27 @@ class Triage:
             if self._availability_counter is not None:
                 self._availability_counter.record_failure(reason=score.reason)
             ev_id = self._new_event_id()
-            insert_event(
-                self._conn, event_id=ev_id, source=env.source,
-                ingested_ts=env.ingested_ts, salience=None,
-                # consume=False: COPY the staging raw file rather than move
-                # it — the redelivery that re-scores this payload reads the
-                # same staging path and must still find its raw text.
-                raw_path=self._canonical_raw_path(ev_id, env.raw_path,
-                                                  consume=False),
-                status="triaged", deduped_of=None,
-                salience_source="deferred",
-            )
+            raw = self._prepare_raw_path(ev_id, env.raw_path, consume=False)
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                insert_event(
+                    self._conn,
+                    event_id=ev_id,
+                    source=env.source,
+                    ingested_ts=env.ingested_ts,
+                    salience=None,
+                    raw_path=raw.canonical_path,
+                    status="triaged",
+                    deduped_of=None,
+                    salience_source="deferred",
+                    commit=False,
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raw.rollback()
+                raise
+            raw.commit()
             log.warning(
                 "salience deferred (%s): event %s recorded un-scored; dedupe "
                 "recording skipped so a redelivery re-scores", score.reason,
@@ -275,37 +331,80 @@ class Triage:
                     [m.ticker for m in score.mentioned_tickers]
         validated = self._validator.filter(candidate)
 
-        # Write event.
+        # Commit the event and every durable triage side effect atomically.
+        # The transaction repeats both dedupe checks while holding SQLite's
+        # write lock, closing the race between concurrent async consumers.
         ev_id = self._new_event_id()
-        insert_event(
-            self._conn, event_id=ev_id, source=env.source,
-            ingested_ts=env.ingested_ts, salience=score.salience,
-            raw_path=self._canonical_raw_path(ev_id, env.raw_path),
-            status="triaged", deduped_of=None,
-            salience_source=score.source,   # 'llm' | 'cache'
-        )
-        # Record fingerprints + embedding (only on non-duplicates).
-        await self._ds1.record(env, event_id=ev_id)
-        # ds2.record embeds the text (CPU-bound) — also off-thread via the
-        # same single-thread executor so sqlite access stays serialized.
-        await loop.run_in_executor(
-            self._ds2_executor,
-            lambda: self._ds2.record(text=env.text, event_id=ev_id),
-        )
-
-        # Per-ticker rows + watchlist gate.
+        raw = self._prepare_raw_path(ev_id, env.raw_path)
         conf_by_ticker = {m.ticker: m.confidence for m in score.mentioned_tickers}
-        for t in validated:
-            conf = conf_by_ticker.get(t, 0.5)  # source-tag tickers default to 0.5
-            insert_event_ticker(self._conn, event_id=ev_id, ticker=t,
-                                 confidence=conf)
-            auto_promote(
-                self._conn, ticker=t, event_id=ev_id,
-                salience=score.salience, confidence=conf,
-                salience_threshold=self._salience_threshold,
-                confidence_threshold=self._confidence_threshold,
-                ttl_days=self._ttl_days,
+        duplicate_of: Optional[str] = None
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            duplicate_of = self._ds1.check_persistent(env)
+            if duplicate_of is None:
+                duplicate_of = self._ds2.check_packed(
+                    packed_embedding, conn=self._conn
+                )
+            insert_event(
+                self._conn,
+                event_id=ev_id,
+                source=env.source,
+                ingested_ts=env.ingested_ts,
+                salience=None if duplicate_of else score.salience,
+                raw_path=raw.canonical_path,
+                status="duplicate" if duplicate_of else "triaged",
+                deduped_of=duplicate_of,
+                salience_source=None if duplicate_of else score.source,
+                commit=False,
             )
+            if duplicate_of is None:
+                self._ds1.record_persistent(
+                    env, event_id=ev_id, commit=False
+                )
+                self._ds2.record_packed(
+                    packed=packed_embedding,
+                    event_id=ev_id,
+                    conn=self._conn,
+                    commit=False,
+                )
+                for ticker in validated:
+                    confidence = conf_by_ticker.get(ticker, 0.5)
+                    insert_event_ticker(
+                        self._conn,
+                        event_id=ev_id,
+                        ticker=ticker,
+                        confidence=confidence,
+                        commit=False,
+                    )
+                    auto_promote(
+                        self._conn,
+                        ticker=ticker,
+                        event_id=ev_id,
+                        salience=score.salience,
+                        confidence=confidence,
+                        salience_threshold=self._salience_threshold,
+                        confidence_threshold=self._confidence_threshold,
+                        ttl_days=self._ttl_days,
+                        commit=False,
+                    )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raw.rollback()
+            raise
+        raw.commit()
+
+        if duplicate_of is not None:
+            return TriageResult(
+                event_id=ev_id, status="duplicate", deduped_of=duplicate_of
+            )
+
+        try:
+            await self._ds1.warm_cache(env)
+        except Exception:
+            # Redis sets are an accelerator only. SQLite is authoritative and
+            # already committed, so a cache outage must not cause redelivery.
+            log.warning("could not warm dedupe cache for %s", ev_id, exc_info=True)
 
         return TriageResult(event_id=ev_id, status="triaged",
                             salience=score.salience,
@@ -345,6 +444,7 @@ async def dead_letter_sweep(
         _, fields = items[0]
         await r.xadd(dead_stream, fields)
         await r.xack(src_stream, group, msg_id)
+        await r.xdel(src_stream, msg_id)
         moved += 1
     return moved
 
@@ -375,6 +475,13 @@ async def _process_entry(self, *, env_id, raw_fields, group: str,
         env = Envelope.from_redis_fields(fields)
         await self.process_one(env)
         await self._redis.xack(stream, group, env_id)
+        try:
+            await self._redis.xdel(stream, env_id)
+        except Exception:
+            # The database commit and XACK are authoritative. A failed trim
+            # leaks Redis memory but must not misclassify the event as failed.
+            log.warning("could not trim acknowledged stream entry %s", env_id,
+                        exc_info=True)
         return True
     except Exception:
         log.exception("triage failed for %s; leaving on PEL", env_id)
@@ -413,7 +520,8 @@ async def _reclaim_pending(self, *, group: str, consumer: str, stream: str,
     try:
         claimed = res[1] if isinstance(res, (list, tuple)) and len(res) >= 2 else []
     except Exception:
-        log.exception("could not parse xautoclaim result"); return 0
+        log.exception("could not parse xautoclaim result")
+        return 0
     if not claimed:
         return 0
 
@@ -435,6 +543,7 @@ async def _reclaim_pending(self, *, group: str, consumer: str, stream: str,
                 if raw_fields:
                     await self._redis.xadd(dead_stream, _decode_fields(raw_fields))
                 await self._redis.xack(stream, group, env_id)
+                await self._redis.xdel(stream, env_id)
                 log.warning("dead-lettered %s after >= %d deliveries",
                             env_id, max_deliveries)
                 continue
@@ -471,7 +580,8 @@ async def _consume_once(self, *, group: str, consumer: str, stream: str,
             streams={stream: ">"}, count=batch, block=block_ms,
         )
     except Exception:
-        log.exception("XREADGROUP failed"); return handled
+        log.exception("XREADGROUP failed")
+        return handled
     if not result:
         return handled
     for _stream_name, entries in result:
@@ -684,7 +794,7 @@ def _main() -> None:
         # N consumers + refresher + reaper.
         tasks = [refresher(), reaper()]
         for i in range(C["sensing_triage_consumers"]):
-            tasks.append(t.consume_forever(
+            tasks.append(t.consume_forever(  # type: ignore[attr-defined]
                 group=C["sensing_consumer_group"],
                 consumer=f"c{i}",
                 stream=C["sensing_ingest_stream"],

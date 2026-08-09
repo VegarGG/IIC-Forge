@@ -1,4 +1,6 @@
+import ssl
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from tradingagents.persistence.db import connect as iic_connect
@@ -49,6 +51,9 @@ def test_email_outbound_uses_smtplib_and_records_message_id(tmp_path):
 
     smtp_ctor.assert_called_once_with("smtp.gmail.com", 587, timeout=30)
     fake_smtp.starttls.assert_called_once()
+    tls_context = fake_smtp.starttls.call_args.kwargs["context"]
+    assert tls_context.check_hostname is True
+    assert tls_context.verify_mode == ssl.CERT_REQUIRED
     fake_smtp.login.assert_called_once_with("u", "p")
     fake_smtp.send_message.assert_called_once()
     sent_msg = fake_smtp.send_message.call_args[0][0]

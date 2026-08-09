@@ -13,6 +13,7 @@ import tradingagents
 from tradingagents.delivery.render import _plain_env as delivery_templates
 from tradingagents.persistence.db import connect, schema_tables
 from tradingagents.personas.resolver import load_packaged_persona
+from tradingagents.runtime import check_database
 from tradingagents.secretary.service import _env as secretary_templates
 from tradingagents.sensing.seed_tickers import seed_crypto
 
@@ -48,7 +49,8 @@ def main() -> None:
     delivery_templates.get_template("email/event_alert.j2")
 
     with tempfile.TemporaryDirectory(prefix="iic-forge-installed-smoke-") as tmp:
-        conn = connect(str(Path(tmp) / "iic.db"))
+        database_path = str(Path(tmp) / "iic.db")
+        conn = connect(database_path)
         try:
             present = {
                 row[0]
@@ -63,6 +65,9 @@ def main() -> None:
                 raise RuntimeError("packaged crypto universe produced no rows")
         finally:
             conn.close()
+        health = check_database({"iic_db_path": database_path})
+        if health["status"] != "ok":
+            raise RuntimeError(f"packaged runtime database health failed: {health}")
 
     print("installed-package smoke test passed")
 

@@ -10,6 +10,7 @@ import os
 import smtplib
 import hashlib
 import logging
+import ssl
 from email.message import EmailMessage
 from email.utils import parseaddr
 from typing import Any, Dict
@@ -125,7 +126,7 @@ class EmailOutbound(DeliveryChannel):
 
         smtp = smtplib.SMTP(host, port, timeout=30)
         try:
-            smtp.starttls()
+            smtp.starttls(context=ssl.create_default_context())
             smtp.login(user, pw)
             smtp.send_message(msg)
         except smtplib.SMTPAuthenticationError as exc:

@@ -1,7 +1,7 @@
 """DeliveryChannel base class.
 
 Every channel inherits from DeliveryChannel and implements ``_send_impl``.
-The base ``send()`` routes every event alert into the durable outbox. The
+The base ``send()`` routes every automatic outbound into the durable outbox. The
 delivery worker calls ``send_attempt()`` which handles:
   - a final quiet-hours check
   - writing the deliveries row on success / failure / skip
@@ -31,7 +31,7 @@ class DeliveryError(Exception):
         self.category = category
 
 
-_QUIET_HOUR_MODES = {"event_alert", "event_alert_light"}
+_QUEUED_MODES = {"event_alert", "event_alert_light", "morning_digest"}
 
 
 def _utc_now_iso() -> str:
@@ -57,7 +57,7 @@ class DeliveryChannel(ABC):
         """Return (channel_ref, error_msg). Raise on failure."""
 
     def send(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
-        if mode in _QUIET_HOUR_MODES:
+        if mode in _QUEUED_MODES:
             from tradingagents.delivery import queue_store
 
             return queue_store.enqueue_alert(
@@ -74,7 +74,7 @@ class DeliveryChannel(ABC):
 
     def send_attempt(self, *, brief: Dict[str, Any], mode: str, body: str) -> int:
         """Attempt transport now and append one immutable delivery audit row."""
-        if mode in _QUIET_HOUR_MODES and is_quiet_hours(
+        if mode in _QUEUED_MODES and is_quiet_hours(
             local_time=_local_now(
                 self._config["delivery"]["quiet_hours"].get("timezone", "Asia/Shanghai")
             ),

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import struct
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -95,24 +96,53 @@ class DedupeStage1:
 
     async def record(self, env: Envelope, *, event_id: str) -> None:
         """Persist the new event's fingerprints. Call ONLY on non-duplicates."""
+        self.record_persistent(env, event_id=event_id)
+        await self.warm_cache(env)
+
+    def check_persistent(self, env: Envelope) -> Optional[str]:
+        """Recheck durable fingerprints inside the caller's write transaction."""
+        fp = _fp(env.text)
+        if env.external_id:
+            row = self._conn.execute(
+                "SELECT event_id FROM event_fingerprints "
+                "WHERE fingerprint = ? AND kind = 'external_id'",
+                (env.external_id,),
+            ).fetchone()
+            if row:
+                return row["event_id"]
+        row = self._conn.execute(
+            "SELECT event_id FROM event_fingerprints "
+            "WHERE fingerprint = ? AND kind = 'sha256'",
+            (fp,),
+        ).fetchone()
+        return row["event_id"] if row else None
+
+    def record_persistent(
+        self, env: Envelope, *, event_id: str, commit: bool = True
+    ) -> None:
+        """Write durable fingerprints without touching the Redis hot cache."""
         from tradingagents.persistence.store import insert_event_fingerprint
         fp = _fp(env.text)
         if env.external_id:
             insert_event_fingerprint(
                 self._conn, fingerprint=env.external_id, kind="external_id",
-                event_id=event_id, source=env.source,
+                event_id=event_id, source=env.source, commit=False,
             )
-            await self._redis.sadd(self._ext_key(), env.external_id)
-            await self._redis.expire(self._ext_key(), self._ttl_seconds)
         insert_event_fingerprint(
             self._conn, fingerprint=fp, kind="sha256",
-            event_id=event_id, source=env.source,
+            event_id=event_id, source=env.source, commit=False,
         )
+        if commit:
+            self._conn.commit()
+
+    async def warm_cache(self, env: Envelope) -> None:
+        """Populate the optional Redis accelerator after SQLite commits."""
+        fp = _fp(env.text)
+        if env.external_id:
+            await self._redis.sadd(self._ext_key(), env.external_id)
+            await self._redis.expire(self._ext_key(), self._ttl_seconds)
         await self._redis.sadd(self._sha_key(), fp)
         await self._redis.expire(self._sha_key(), self._ttl_seconds)
-
-
-import struct
 
 
 class DedupeStage2:
@@ -139,12 +169,16 @@ class DedupeStage2:
     def _pack(self, vec) -> bytes:
         return bytes(struct.pack(f"{len(vec)}f", *vec))
 
-    def check(self, text: str) -> Optional[str]:
-        vec = self._embedder.embed(text)
-        # sqlite-vec's vec0 KNN requires `k = N` or LIMIT INSIDE the MATCH query —
-        # it cannot push LIMIT down through joins. Pull k nearest neighbours first,
-        # then filter for freshness and pick the best survivor.
-        rows = self._conn.execute(
+    def embed(self, text: str) -> bytes:
+        """Compute and pack one embedding without performing SQLite I/O."""
+        return self._pack(self._embedder.embed(text))
+
+    def check_packed(
+        self, packed: bytes, *, conn: Optional[sqlite3.Connection] = None
+    ) -> Optional[str]:
+        """Check a precomputed vector, optionally on the caller's transaction."""
+        connection = conn or self._conn
+        rows = connection.execute(
             """
             WITH knn AS (
                 SELECT rowid, distance
@@ -156,29 +190,53 @@ class DedupeStage2:
             FROM knn
             JOIN event_embeddings ee ON ee.vec_id = knn.rowid
             JOIN events ev ON ev.event_id = ee.event_id
-            -- datetime() normalizes ISO `T` + `+00:00` to SQLite's
-            -- `YYYY-MM-DD HH:MM:SS` form so same-day comparisons work; raw
-            -- string compare silently fails ('T' 0x54 > ' ' 0x20). Mirrors
-            -- persistence/store.py and watchlist.py.
             WHERE datetime(ev.ingested_ts) > datetime('now', ?)
               AND ev.status != 'duplicate'
             ORDER BY knn.distance ASC
             LIMIT 1
             """,
-            (self._pack(vec), f"-{self._window_hours} hours"),
+            (packed, f"-{self._window_hours} hours"),
         ).fetchall()
         if not rows:
             return None
         top = rows[0]
         return top["event_id"] if top["cosine"] >= self._threshold else None
 
-    def record(self, *, text: str, event_id: str) -> int:
-        """Insert vector into vec_index + event_embeddings; return vec_id."""
+    def check(self, text: str) -> Optional[str]:
+        packed = self.embed(text)
+        # sqlite-vec's vec0 KNN requires `k = N` or LIMIT INSIDE the MATCH query —
+        # it cannot push LIMIT down through joins. Pull k nearest neighbours first,
+        # then filter for freshness and pick the best survivor.
+        return self.check_packed(packed)
+
+    def record_packed(
+        self,
+        *,
+        packed: bytes,
+        event_id: str,
+        conn: Optional[sqlite3.Connection] = None,
+        commit: bool = True,
+    ) -> int:
+        """Insert a precomputed vector and its event link in one transaction."""
         from tradingagents.persistence.store import insert_event_embedding
-        vec = self._embedder.embed(text)
-        cur = self._conn.execute(
-            "INSERT INTO vec_index (embedding) VALUES (?)", (self._pack(vec),),
+
+        connection = conn or self._conn
+        cur = connection.execute(
+            "INSERT INTO vec_index (embedding) VALUES (?)", (packed,),
         )
         vec_id = cur.lastrowid
-        insert_event_embedding(self._conn, event_id=event_id, vec_id=vec_id)
-        return vec_id
+        if vec_id is None:
+            raise RuntimeError("sqlite-vec insert completed without a row id")
+        insert_event_embedding(
+            connection,
+            event_id=event_id,
+            vec_id=vec_id,
+            commit=False,
+        )
+        if commit:
+            connection.commit()
+        return int(vec_id)
+
+    def record(self, *, text: str, event_id: str) -> int:
+        """Insert vector into vec_index + event_embeddings; return vec_id."""
+        return self.record_packed(packed=self.embed(text), event_id=event_id)

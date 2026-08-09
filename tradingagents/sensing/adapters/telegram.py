@@ -9,15 +9,11 @@ Cursor: JSON dict mapping channel username → max message_id seen.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-import sqlite3
 from datetime import datetime, timezone
 from typing import List
-
-import redis.asyncio as aioredis
 
 from tradingagents.sensing.adapters.base import EnvelopeWriter
 from tradingagents.sensing.cursor import CursorStore
@@ -28,7 +24,16 @@ log = logging.getLogger(__name__)
 NAME = "telegram"
 
 
-async def _on_message(event, *, redis, conn, stream: str, staging_root: str) -> None:
+async def _on_message(
+    event,
+    *,
+    redis,
+    conn,
+    stream: str,
+    staging_root: str,
+    require_aof_fsync: bool = False,
+    aof_fsync_timeout_ms: int = 5000,
+) -> None:
     msg = event.message
     text = (msg.message or "").strip()
     if not text:
@@ -46,8 +51,15 @@ async def _on_message(event, *, redis, conn, stream: str, staging_root: str) -> 
                      "msg_date": msg.date.isoformat()},
         raw_path="",
     )
-    writer = EnvelopeWriter(source=NAME, redis=redis, conn=conn,
-                             stream=stream, staging_root=staging_root)
+    writer = EnvelopeWriter(
+        source=NAME,
+        redis=redis,
+        conn=conn,
+        stream=stream,
+        staging_root=staging_root,
+        require_aof_fsync=require_aof_fsync,
+        aof_fsync_timeout_ms=aof_fsync_timeout_ms,
+    )
     await writer.write(env, raw_payload={"channel": channel,
                                           "message_id": msg.id,
                                           "text": text},
@@ -61,7 +73,8 @@ def _main() -> None:
     from tradingagents.sensing.redis_client import make_redis
 
     if not C["sensing_adapters_enabled"].get(NAME, True):
-        log.info("%s disabled; exiting 0", NAME); return
+        log.info("%s disabled; exiting 0", NAME)
+        return
 
     api_id = os.environ.get("TELEGRAM_API_ID")
     api_hash = os.environ.get("TELEGRAM_API_HASH")
@@ -90,7 +103,13 @@ def _main() -> None:
         try:
             await _on_message(event, redis=redis, conn=conn,
                               stream=C["sensing_ingest_stream"],
-                              staging_root=staging)
+                              staging_root=staging,
+                              require_aof_fsync=bool(
+                                  C["sensing_require_aof_fsync"]
+                              ),
+                              aof_fsync_timeout_ms=int(
+                                  C["sensing_aof_fsync_timeout_ms"]
+                              ))
         except Exception:
             log.exception("telegram handler crashed (event dropped, will continue)")
 

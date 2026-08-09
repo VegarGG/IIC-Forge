@@ -383,6 +383,60 @@ def delivery_inspect(delivery_job_id: int) -> None:
 
 
 # ---------------------------------------------------------------------
+# production runtime sub-app
+# ---------------------------------------------------------------------
+
+runtime_app = typer.Typer(
+    name="runtime", help="Docker Compose initialization and health controls"
+)
+app.add_typer(runtime_app, name="runtime")
+
+
+@runtime_app.command("init")
+def runtime_init(
+    require_production_config: bool = typer.Option(
+        False,
+        "--require-production-config",
+        help="Refuse startup unless the complete private-production contract is set",
+    ),
+) -> None:
+    """Create private data paths, migrate SQLite, and verify integrity."""
+    from tradingagents.runtime import initialize_runtime
+
+    result = initialize_runtime(
+        DEFAULT_CONFIG,
+        require_production_config=require_production_config,
+    )
+    console.print_json(json.dumps(result))
+
+
+@runtime_app.command("health")
+def runtime_health(
+    database: bool = typer.Option(True, "--database/--no-database"),
+    redis: bool = typer.Option(True, "--redis/--no-redis"),
+) -> None:
+    """Exit non-zero unless the selected production dependencies are healthy."""
+    from tradingagents.runtime import check_database, check_redis
+
+    if not database and not redis:
+        raise typer.BadParameter("at least one health check must be enabled")
+    result = {}
+    if database:
+        result["database"] = check_database(DEFAULT_CONFIG)
+    if redis:
+        result["redis"] = check_redis(DEFAULT_CONFIG)
+    console.print_json(json.dumps(result))
+
+
+@runtime_app.command("run")
+def runtime_run(service: str) -> None:
+    """Run one supported Compose service in the foreground."""
+    from tradingagents.runtime import run_named_service
+
+    run_named_service(service)
+
+
+# ---------------------------------------------------------------------
 # F5: morning-digest + digest sub-apps
 # ---------------------------------------------------------------------
 from cli.morning import morning_app, digest_app  # noqa: E402

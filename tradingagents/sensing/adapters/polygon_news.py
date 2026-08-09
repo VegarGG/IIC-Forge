@@ -32,9 +32,18 @@ MAX_CURSOR_LAG_HOURS = 6  # if last cursor older than this, resume from now-N
 class PolygonNewsAdapter:
     name = NAME
 
-    def __init__(self, *, staging_root: str, stream: str) -> None:
+    def __init__(
+        self,
+        *,
+        staging_root: str,
+        stream: str,
+        require_aof_fsync: bool = False,
+        aof_fsync_timeout_ms: int = 5000,
+    ) -> None:
         self._staging = staging_root
         self._stream = stream
+        self._require_aof_fsync = require_aof_fsync
+        self._aof_fsync_timeout_ms = aof_fsync_timeout_ms
 
     def _api_key(self) -> str:
         k = os.environ.get("POLYGON_API_KEY")
@@ -73,7 +82,9 @@ class PolygonNewsAdapter:
             return 0
 
         writer = EnvelopeWriter(source=NAME, redis=redis, conn=conn,
-                                 stream=self._stream, staging_root=self._staging)
+                                 stream=self._stream, staging_root=self._staging,
+                                 require_aof_fsync=self._require_aof_fsync,
+                                 aof_fsync_timeout_ms=self._aof_fsync_timeout_ms)
         emitted = 0
         for item in data.get("results", []):
             published = item.get("published_utc", "")
@@ -118,7 +129,12 @@ def _main() -> None:
     redis = make_redis(C["sensing_redis_url"])
     conn = connect(C["iic_db_path"])
     staging = os.path.join(C["iic_data_dir"], "events", "staging")
-    a = PolygonNewsAdapter(staging_root=staging, stream=C["sensing_ingest_stream"])
+    a = PolygonNewsAdapter(
+        staging_root=staging,
+        stream=C["sensing_ingest_stream"],
+        require_aof_fsync=bool(C["sensing_require_aof_fsync"]),
+        aof_fsync_timeout_ms=int(C["sensing_aof_fsync_timeout_ms"]),
+    )
     asyncio.run(a.stream(redis=redis, conn=conn))
 
 

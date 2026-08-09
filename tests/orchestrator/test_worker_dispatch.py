@@ -107,11 +107,76 @@ def test_dispatch_unknown_job_type_raises(setup):
 
     conn, data_dir = setup
     sec = MagicMock()
-    job = {"job_id": 1, "job_type": "morning_digest", "payload": "{}",
+    job = {"job_id": 1, "job_type": "portfolio_rebalance", "payload": "{}",
            "trigger_event_id": None}
     with pytest.raises(JobBlockedError, match="unknown job_type") as exc_info:
         dispatch(conn, job, secretary=sec)
     assert exc_info.value.category == "unknown_job_type"
+
+
+@pytest.mark.unit
+def test_dispatch_morning_digest_uses_stable_payload_and_rolls_up(setup):
+    from datetime import date
+    from tradingagents.orchestrator.dispatch import dispatch_morning_digest
+    from tradingagents.runtime.scheduler import morning_digest_brief_id
+
+    conn, _data_dir = setup
+    brief_id = morning_digest_brief_id(date(2026, 8, 9))
+    store.insert_brief(
+        conn,
+        brief_id=brief_id,
+        mode="morning_digest",
+        scope='["AAPL"]',
+        generated_ts="2026-08-09T07:00:00+08:00",
+        content_path=f"briefs/{brief_id}.md",
+        run_ids=[],
+    )
+    secretary = MagicMock()
+    secretary.compose_morning_digest.return_value = brief_id
+    job = {
+        "job_id": 2,
+        "job_type": "morning_digest",
+        "payload": json.dumps(
+            {
+                "brief_id": brief_id,
+                "local_date": "2026-08-09",
+                "scheduled_ts": "2026-08-09T07:00:00+08:00",
+            }
+        ),
+        "trigger_event_id": None,
+    }
+
+    result = dispatch_morning_digest(conn, job, secretary=secretary)
+
+    secretary.compose_morning_digest.assert_called_once_with(
+        watchlist=None,
+        ts="2026-08-09T07:00:00+08:00",
+        brief_id=brief_id,
+        deliver=True,
+    )
+    assert result == {"brief_id": brief_id, "run_ids": [], "cost_usd": 0.0}
+
+
+@pytest.mark.unit
+def test_dispatch_morning_digest_rejects_mismatched_daily_id(setup):
+    from tradingagents.orchestrator.dispatch import JobBlockedError, dispatch
+
+    conn, _data_dir = setup
+    job = {
+        "job_id": 2,
+        "job_type": "morning_digest",
+        "payload": json.dumps(
+            {
+                "brief_id": "wrong",
+                "local_date": "2026-08-09",
+                "scheduled_ts": "2026-08-09T07:00:00+08:00",
+            }
+        ),
+        "trigger_event_id": None,
+    }
+    with pytest.raises(JobBlockedError, match="deterministic daily id") as exc_info:
+        dispatch(conn, job, secretary=MagicMock())
+    assert exc_info.value.category == "invalid_payload"
 
 
 @pytest.mark.unit

@@ -1,16 +1,17 @@
 """`forge morning-digest` and `forge digest tail` sub-commands.
 
-morning-digest --now runs compose_morning_digest then delivers via every
-enabled channel. --dry-run skips channel.send() calls (used by F5 pre-flight).
-digest tail prints the most recent morning_digest brief content.
+The manual command composes immediately but uses the same durable delivery
+outbox as the production scheduler. ``--dry-run`` omits the outbox rows.
 """
 
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+import sqlite3
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Tuple
+from zoneinfo import ZoneInfo
 
 import typer
 
@@ -26,7 +27,7 @@ morning_app = typer.Typer(name="morning-digest", help="Morning digest scheduling
 digest_app = typer.Typer(name="digest", help="Digest helpers")
 
 
-def _build_secretary(config: dict) -> Tuple[object, object]:
+def _build_secretary(config: dict) -> Tuple[Any, sqlite3.Connection]:
     from tradingagents.llm_clients.factory import create_llm_client
     from tradingagents.secretary.service import Secretary
 
@@ -40,78 +41,28 @@ def _build_secretary(config: dict) -> Tuple[object, object]:
     return sec, conn
 
 
-def _build_channels(conn, config) -> Dict[str, object]:
-    enabled = config["delivery"]["enabled_channels"]
-    out: Dict[str, object] = {}
-    if "cli" in enabled:
-        from tradingagents.delivery.cli import CLIOutbound
-        out["cli"] = CLIOutbound(conn=conn, config=config)
-    if "email" in enabled:
-        from tradingagents.delivery.email import EmailOutbound
-        out["email"] = EmailOutbound(conn=conn, config=config)
-    if "telegram" in enabled:
-        from tradingagents.delivery.telegram import TelegramOutbound
-        out["telegram"] = TelegramOutbound(conn=conn, config=config)
-    return out
-
-
-def _parse_tickers_from_body(body: str) -> list:
-    """Cheap shim: parse the per-ticker sections written by compose_morning_digest."""
-    tickers: list = []
-    current: dict = {}
-    for line in body.splitlines():
-        if line.startswith("## "):
-            if current:
-                tickers.append(current)
-            current = {"ticker": line[3:].strip(), "consensus": "",
-                       "divergence": "", "recommendation": ""}
-        elif line.startswith("**Consensus:** "):
-            current["consensus"] = line[len("**Consensus:** "):]
-        elif line.startswith("**Divergence:** "):
-            current["divergence"] = line[len("**Divergence:** "):]
-        elif line.startswith("**Recommendation:** "):
-            current["recommendation"] = line[len("**Recommendation:** "):]
-    if current:
-        tickers.append(current)
-    return tickers
-
-
 @morning_app.command("now")
 def morning_digest_now(
-    dry_run: bool = typer.Option(False, "--dry-run", help="Compose but skip channel sends"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Compose but skip durable delivery enqueue"
+    ),
 ) -> None:
     config = _config()
     sec, conn = _build_secretary(config)
-    ts = datetime.now(timezone.utc).isoformat()
-    brief_id = sec.compose_morning_digest(watchlist=None, ts=ts)
+    zone_name = config["delivery"]["quiet_hours"]["timezone"]
+    ts = datetime.now(ZoneInfo(zone_name)).isoformat()
+    brief_id = sec.compose_morning_digest(
+        watchlist=None, ts=ts, deliver=not dry_run
+    )
     typer.echo(f"morning_digest brief composed: {brief_id}")
 
     if dry_run:
-        typer.echo("dry-run: skipping channel sends")
+        typer.echo("dry-run: skipping delivery enqueue")
         return
-
-    from tradingagents.persistence import store as _st
-    brief = _st.load_brief(conn, brief_id)
-    body_path = Path(config["iic_data_dir"]) / brief["content_path"]
-    body = body_path.read_text() if body_path.exists() else ""
-
-    channels = _build_channels(conn, config)
-    from tradingagents.delivery.render import render_for_channel
-    for name, channel in channels.items():
-        if name == "telegram":
-            rendered = render_for_channel(
-                channel=name, mode="morning_digest",
-                brief={**brief, "tickers": _parse_tickers_from_body(body)},
-            )
-        elif name == "email":
-            rendered = render_for_channel(
-                channel="email", mode="morning_digest",
-                brief={**brief, "tickers": _parse_tickers_from_body(body)},
-            )
-        else:
-            rendered = body
-        delivery_id = channel.send(brief=brief, mode="morning_digest", body=rendered)
-        typer.echo(f"  delivered via {name}: delivery_id={delivery_id}")
+    queued = conn.execute(
+        "SELECT COUNT(*) FROM delivery_queue WHERE brief_id = ?", (brief_id,)
+    ).fetchone()[0]
+    typer.echo(f"queued {queued} durable delivery job(s)")
 
 
 @digest_app.command("tail")

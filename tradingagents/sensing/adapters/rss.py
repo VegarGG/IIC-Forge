@@ -37,10 +37,20 @@ def _entry_ts(entry) -> str:
 class RssAdapter:
     name = NAME
 
-    def __init__(self, *, feeds: List[str], staging_root: str, stream: str) -> None:
+    def __init__(
+        self,
+        *,
+        feeds: List[str],
+        staging_root: str,
+        stream: str,
+        require_aof_fsync: bool = False,
+        aof_fsync_timeout_ms: int = 5000,
+    ) -> None:
         self._feeds = list(feeds)
         self._staging = staging_root
         self._stream = stream
+        self._require_aof_fsync = require_aof_fsync
+        self._aof_fsync_timeout_ms = aof_fsync_timeout_ms
 
     def _load_cursor(self, conn) -> dict:
         cs = CursorStore(conn)
@@ -53,7 +63,9 @@ class RssAdapter:
     async def poll_once(self, *, redis: aioredis.Redis, conn: sqlite3.Connection) -> int:
         cursors = self._load_cursor(conn)
         writer = EnvelopeWriter(source=NAME, redis=redis, conn=conn,
-                                 stream=self._stream, staging_root=self._staging)
+                                 stream=self._stream, staging_root=self._staging,
+                                 require_aof_fsync=self._require_aof_fsync,
+                                 aof_fsync_timeout_ms=self._aof_fsync_timeout_ms)
         emitted = 0
         for feed_url in self._feeds:
             try:
@@ -118,15 +130,21 @@ def _main() -> None:
     from tradingagents.sensing.redis_client import make_redis
 
     if not C["sensing_adapters_enabled"].get(NAME, True):
-        log.info("%s disabled; exiting 0", NAME); return
+        log.info("%s disabled; exiting 0", NAME)
+        return
     feeds = [f.strip() for f in os.environ.get("RSS_FEEDS", "").split(",") if f.strip()]
     if not feeds:
         log.warning("RSS_FEEDS env var not set; no feeds to poll")
     redis = make_redis(C["sensing_redis_url"])
     conn = connect(C["iic_db_path"])
     staging = os.path.join(C["iic_data_dir"], "events", "staging")
-    a = RssAdapter(feeds=feeds, staging_root=staging,
-                    stream=C["sensing_ingest_stream"])
+    a = RssAdapter(
+        feeds=feeds,
+        staging_root=staging,
+        stream=C["sensing_ingest_stream"],
+        require_aof_fsync=bool(C["sensing_require_aof_fsync"]),
+        aof_fsync_timeout_ms=int(C["sensing_aof_fsync_timeout_ms"]),
+    )
     asyncio.run(a.stream(redis=redis, conn=conn))
 
 

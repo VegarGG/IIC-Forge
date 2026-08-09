@@ -1,8 +1,9 @@
 """Quiet-hours scheduling for durable alert delivery.
 
-Quiet hours apply to ``event_alert`` and ``event_alert_light``; morning_digest
-and deep_dive bypass. Alerts are retained in the outbox until the configured
-release boundary; the transport worker performs a final predicate check.
+Quiet hours apply to every automatic outbound placed in the delivery outbox,
+including the morning digest. Rows are retained until the configured release
+boundary; the transport worker performs a final predicate check. A digest
+scheduled exactly at the 07:00 boundary is immediately eligible.
 """
 
 from __future__ import annotations

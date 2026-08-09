@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 
@@ -45,6 +47,16 @@ def test_render_email_morning_digest_html():
     out = render_for_channel(channel="email", mode="morning_digest", brief=digest_brief)
     assert "<html" in out.lower()
     assert "AAPL" in out
+
+
+@pytest.mark.unit
+def test_email_templates_do_not_publish_loopback_dashboard_links():
+    template_dir = Path("tradingagents/delivery/templates/email")
+    rendered_source = "\n".join(
+        path.read_text(encoding="utf-8") for path in template_dir.glob("*.j2")
+    )
+    assert "127.0.0.1" not in rendered_source
+    assert "localhost" not in rendered_source
 
 
 @pytest.mark.unit

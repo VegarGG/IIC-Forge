@@ -102,6 +102,33 @@ jobs:
             iic-forge:ci \
             -c "from tradingagents.sensing.embeddings import SentenceTransformerEmbedder; e = SentenceTransformerEmbedder(); e.load(); assert len(e.embed('health check')) == 384"
 
+      - name: Validate canonical Compose and clean-volume initialization
+        env:
+          IIC_ENV_FILE: .env.production.example
+          IIC_IMAGE: iic-forge:ci
+          IIC_SECRETS_DIR: /tmp/iic-forge-ci-secrets
+        run: |
+          install -d -m 0700 "$IIC_SECRETS_DIR"
+          for name in deepseek_api_key polygon_api_key telegram_api_id \
+                      telegram_api_hash telegram_bot_token smtp_user \
+                      smtp_app_password; do
+            printf '%s\n' 'ci-placeholder' > "$IIC_SECRETS_DIR/$name"
+            chmod 0600 "$IIC_SECRETS_DIR/$name"
+          done
+          printf '%s\n' '12345' > "$IIC_SECRETS_DIR/telegram_api_id"
+          docker compose config --quiet
+          docker compose up --no-build --detach --wait redis
+          docker compose run --rm --no-deps volume-init
+          docker compose run --rm --no-deps database-init
+
+      - name: Remove Compose smoke volumes
+        if: always()
+        env:
+          IIC_ENV_FILE: .env.production.example
+          IIC_IMAGE: iic-forge:ci
+          IIC_SECRETS_DIR: /tmp/iic-forge-ci-secrets
+        run: docker compose down --volumes --remove-orphans
+
   quality-baseline:
     name: Non-blocking quality baseline
     runs-on: ubuntu-latest

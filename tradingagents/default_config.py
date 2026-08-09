@@ -20,6 +20,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_DEEPSEEK_REASONING_EFFORT": "deepseek_reasoning_effort",
     "TRADINGAGENTS_IIC_DB_PATH":          "iic_db_path",
     "TRADINGAGENTS_IIC_DATA_DIR":         "iic_data_dir",
+    "TRADINGAGENTS_SENSING_REDIS_URL":     "sensing_redis_url",
+    "TRADINGAGENTS_SENSING_REQUIRE_AOF_FSYNC": "sensing_require_aof_fsync",
     "TRADINGAGENTS_COST_GUARD_ENABLED":   "cost_guard_enabled",
     "TRADINGAGENTS_ORCHESTRATOR_ENABLED": "orchestrator_enabled",
 }
@@ -127,6 +129,11 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     "cost_guard_enabled": False,
     # IIC-FORGE F3 — always-on sensing + triage
     "sensing_redis_url": "redis://127.0.0.1:6379/0",
+    # Production adapters wait for Redis to fsync each stream append before
+    # advancing their durable SQLite cursor. This requires Redis >= 7.2 and
+    # AOF enabled; the canonical Compose service satisfies both conditions.
+    "sensing_require_aof_fsync": True,
+    "sensing_aof_fsync_timeout_ms": 5000,
     "sensing_ingest_stream": "ingest:raw",
     "sensing_consumer_group": "triage",
     "sensing_dead_stream": "ingest:dead",
@@ -145,9 +152,11 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
         "polygon_news": True,
         "telegram": True,
         "rss": True,
-        "gdelt": True,
-        "macro": True,
-        "x": False,   # off by default per spec D8 / R-F3-3
+        # The approved private deployment ingests exactly Polygon, Telegram,
+        # and RSS. Other implemented connectors stay explicitly disabled.
+        "gdelt": False,
+        "macro": False,
+        "x": False,
     },
     # IIC-FORGE F4 — autonomous trigger loop (orchestrator)
     "orchestrator_enabled": False,
@@ -314,12 +323,14 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
         "enabled": False,
         "host": "smtp.gmail.com",
         "port": 587,
-        "from_addr": "watter008@gmail.com",
-        "to_addrs": ["watter008@gmail.com"],
+        "from_addr": "",
+        "to_addrs": [],
     },
     "morning_digest": {
         "schedule_local_time": "07:00",
         "watchlist_source": "db",
+        "scheduler_poll_seconds": 30,
+        "watchlist_sweep_seconds": 3600,
     },
     # Per-role LLM routing. Each entry resolves role -> override -> global default
     # via create_role_llm() (Task 5). Defaults are all-None so production behavior

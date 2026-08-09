@@ -150,8 +150,12 @@ activemq-data/
 # Environments
 .env
 .env.example
+.env.production
+.env.production.*
+!.env.production.example
 .envrc
-docker-compose.yml
+secrets/*
+!secrets/README.md
 .venv
 env/
 venv/

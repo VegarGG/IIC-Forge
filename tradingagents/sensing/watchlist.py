@@ -32,6 +32,7 @@ def auto_promote(
     salience_threshold: float,
     confidence_threshold: float,
     ttl_days: int,
+    commit: bool = True,
 ) -> int:
     """Promote a ticker if it clears both thresholds. Returns 1 if upserted, 0 otherwise.
 
@@ -53,13 +54,14 @@ def auto_promote(
     if user_curated:
         # Refresh last_briefed only; keep ttl_until = NULL.
         upsert_watchlist(conn, ticker=ticker, ttl_until=None,
-                         tags=["user", f"event:{event_id}"])
+                         tags=["user", f"event:{event_id}"], commit=commit)
         return 0
 
     ttl_until = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
     upsert_watchlist(
         conn, ticker=ticker, ttl_until=ttl_until,
         tags=["auto", f"event:{event_id}"],
+        commit=commit,
     )
     return 1
 

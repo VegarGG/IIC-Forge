@@ -143,28 +143,35 @@ measurable exit gate (`scripts/f*_exit_gate.py`) whose report lands in
 > `scripts/f4_f5_exit_gate.py` for the combined approval-through-delivery exit
 > gate.
 
-## Quickstart
+## Production quickstart
 
-Requires Python ≥ 3.10 and a running Redis (a Docker container is fine).
+Docker Compose is the canonical production runtime. It starts only the
+approved RSS, Telegram, and Polygon ingestion connectors, plus Redis, triage,
+promotion, the Beijing-time scheduler, one analysis worker, durable delivery,
+Telegram callbacks, and the action handler.
 
 ```bash
-# 1. Install (editable)
-pip install -e .
-# optional vendor/sensing extras:
-pip install -e ".[sensing,polygon,osint]"
+cp .env.production.example .env.production
+chmod 0600 .env.production
+install -d -m 0700 secrets
+# Create the seven mode-0600 files listed in secrets/README.md.
+docker compose config --quiet
+docker compose build --pull
+docker compose up -d redis volume-init database-init ticker-seed
+# Authorize the persistent Telegram ingestion session once:
+docker compose run --rm sense-telegram
+docker compose up -d
+docker compose ps
+```
 
-# 2. Configure — copy the example and fill in keys
-cp .env.example .env      # then edit .env (see Configuration below)
+See
+[`ops/runbooks/production-readiness-batch-6.md`](ops/runbooks/production-readiness-batch-6.md)
+for first boot, health gates, durability probes, live delivery tests, upgrades,
+and rollback. Local editable installs remain supported for development:
 
-# 3. Redis (e.g. the iic-redis container)
-docker run -d --name iic-redis -p 6379:6379 -v /srv/iic/redis:/data \
-  redis:7-alpine redis-server --appendonly yes
-
-# 4. Seed the ticker reference table (~12k US equities + crypto)
-tradingagents forge sense reseed-tickers
-
-# 5. One-off deep-dive (no daemons needed)
-tradingagents deepdive AAPL
+```bash
+pip install -e ".[dev,production]"
+tradingagents --help
 ```
 
 The console script `tradingagents` (= `cli.main:app`) is the entry point;
@@ -187,7 +194,7 @@ tradingagents forge orchestrator status        # queue + recent jobs
 tradingagents forge orchestrator retry <job-id> --note "reason for replay"
 python scripts/f4_f5_exit_gate.py --since 2026-06-03T09:00:00Z --window-hours 12
 
-# Durable alert delivery
+# Durable alert and digest delivery
 tradingagents forge delivery worker             # foreground outbox worker
 tradingagents forge delivery status             # queued/running/sent/dead intents
 tradingagents forge delivery retry <delivery-job-id>
@@ -199,7 +206,7 @@ tradingagents forge alert dismiss <brief-id>
 tradingagents forge action-handler run         # consumer: turns approvals into study jobs
 
 # Secretary / delivery
-tradingagents forge morning-digest now         # compose + send the digest
+tradingagents forge morning-digest now         # compose + queue the digest
 tradingagents forge digest tail                # recent digests
 
 # Dashboard
@@ -281,10 +288,11 @@ historical runs reproducible.
 
 ## Operations
 
-- **systemd units** (`ops/systemd/`): one per sensing adapter, plus triage,
-  promoter, worker, **action-handler**, dashboard, telegram bot, and the
-  morning (06:00) / watchlist timers. A `redis-server.service` docker alias
-  satisfies the `Requires=` dependency.
+- **Docker Compose** (`docker-compose.yml`): canonical production topology,
+  dependency gates, health checks, local volumes, resource ceilings, and
+  secret-file mounts.
+- **systemd units** (`ops/systemd/`): retained as legacy development/soak
+  artifacts; they are not the supported production supervisor.
 - **Runbooks** (`ops/runbooks/`): per-phase exit-gate procedures (pre-flight,
   run, evaluate).
 - **Backups** (`ops/backup.sh`): SQLite `.backup` + Redis AOF snapshot.
@@ -292,19 +300,10 @@ historical runs reproducible.
 Bring up the sensing + orchestration + approval stack:
 
 ```bash
-sudo cp ops/systemd/*.service ops/systemd/*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now redis-server.service
-sudo systemctl start iic-triage iic-sense-rss iic-sense-polygon iic-sense-gdelt \
-                     iic-sense-macro iic-sense-telegram \
-                     iic-promoter iic-worker iic-action-handler
-# optional, for phone approvals + alert delivery:
-sudo systemctl start iic-telegram-bot
+docker compose up -d
+docker compose ps
+docker compose logs --since 10m triage promoter analysis-worker delivery-worker
 ```
-
-> The committed units target this deployment (conda interpreter, repo at
-> `/home/ziwei-huang/TradingAgents/TradingAgents`, logs to journal). Adjust
-> `User=`, `WorkingDirectory=`, and the interpreter path for another host.
 
 ## Design decisions
 

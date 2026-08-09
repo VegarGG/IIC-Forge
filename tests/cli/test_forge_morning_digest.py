@@ -6,60 +6,63 @@ from tradingagents.persistence import store
 
 
 @pytest.mark.unit
-def test_morning_digest_now_invokes_compose_and_delivers(tmp_path, capsys, monkeypatch):
+def test_morning_digest_now_invokes_compose_and_queues(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_IIC_DB_PATH", str(tmp_path / "iic.db"))
     monkeypatch.setenv("TRADINGAGENTS_IIC_DATA_DIR", str(tmp_path / "data"))
-    import importlib, tradingagents.default_config as dc
+    import importlib
+    import tradingagents.default_config as dc
     importlib.reload(dc)
 
     conn = iic_connect(str(tmp_path / "iic.db"))
     store.upsert_watchlist(conn, ticker="AAPL", ttl_until=None, tags=["user"])
 
-    with patch("cli.morning._build_secretary") as builder, \
-         patch("cli.morning._build_channels") as channels:
+    with patch("cli.morning._build_secretary") as builder:
         sec = MagicMock()
         sec.compose_morning_digest.return_value = "br1"
         builder.return_value = (sec, conn)
 
-        ch_cli = MagicMock(); ch_cli.send.return_value = 1
-        ch_email = MagicMock(); ch_email.send.return_value = 2
-        channels.return_value = {"cli": ch_cli, "email": ch_email}
-
         (tmp_path / "data" / "briefs").mkdir(parents=True, exist_ok=True)
         (tmp_path / "data" / "briefs" / "br1.md").write_text("BODY")
-        # Insert brief row so load_brief works
+        # Insert the rows the real compose call would atomically enqueue.
         store.insert_brief(
             conn, brief_id="br1", mode="morning_digest", scope='["AAPL"]',
             generated_ts="2026-05-27T07:00:00+00:00",
             content_path="briefs/br1.md", run_ids=["r1"],
         )
+        conn.execute(
+            "INSERT INTO delivery_queue "
+            "(idempotency_key, brief_id, channel, mode, brief_payload, body, "
+            "state, attempt_count, max_attempts, available_ts, created_ts, updated_ts) "
+            "VALUES ('k1', 'br1', 'telegram', 'morning_digest', '{}', 'body', "
+            "'queued', 0, 5, '2026-05-27T07:00:00+00:00', "
+            "'2026-05-27T07:00:00+00:00', '2026-05-27T07:00:00+00:00')"
+        )
+        conn.commit()
 
         from cli.morning import morning_digest_now
         morning_digest_now(dry_run=False)
 
-    sec.compose_morning_digest.assert_called_once()
-    ch_cli.send.assert_called_once()
-    ch_email.send.assert_called_once()
+    kwargs = sec.compose_morning_digest.call_args.kwargs
+    assert kwargs["watchlist"] is None
+    assert kwargs["deliver"] is True
+    assert "queued 1 durable delivery job(s)" in capsys.readouterr().out
 
 
 @pytest.mark.unit
-def test_morning_digest_dry_run_skips_sends(tmp_path, monkeypatch):
+def test_morning_digest_dry_run_skips_queue(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_IIC_DB_PATH", str(tmp_path / "iic.db"))
     monkeypatch.setenv("TRADINGAGENTS_IIC_DATA_DIR", str(tmp_path / "data"))
-    import importlib, tradingagents.default_config as dc
+    import importlib
+    import tradingagents.default_config as dc
     importlib.reload(dc)
 
     conn = iic_connect(str(tmp_path / "iic.db"))
     store.upsert_watchlist(conn, ticker="AAPL", ttl_until=None, tags=["user"])
 
-    with patch("cli.morning._build_secretary") as builder, \
-         patch("cli.morning._build_channels") as channels:
+    with patch("cli.morning._build_secretary") as builder:
         sec = MagicMock()
         sec.compose_morning_digest.return_value = "br1"
         builder.return_value = (sec, conn)
-
-        ch_cli = MagicMock()
-        channels.return_value = {"cli": ch_cli}
 
         (tmp_path / "data" / "briefs").mkdir(parents=True, exist_ok=True)
         (tmp_path / "data" / "briefs" / "br1.md").write_text("BODY")
@@ -67,15 +70,15 @@ def test_morning_digest_dry_run_skips_sends(tmp_path, monkeypatch):
         from cli.morning import morning_digest_now
         morning_digest_now(dry_run=True)
 
-    sec.compose_morning_digest.assert_called_once()
-    ch_cli.send.assert_not_called()
+    assert sec.compose_morning_digest.call_args.kwargs["deliver"] is False
 
 
 @pytest.mark.unit
 def test_digest_tail_prints_latest(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_IIC_DB_PATH", str(tmp_path / "iic.db"))
     monkeypatch.setenv("TRADINGAGENTS_IIC_DATA_DIR", str(tmp_path / "data"))
-    import importlib, tradingagents.default_config as dc
+    import importlib
+    import tradingagents.default_config as dc
     importlib.reload(dc)
 
     conn = iic_connect(str(tmp_path / "iic.db"))

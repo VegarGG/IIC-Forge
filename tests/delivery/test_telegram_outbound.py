@@ -88,7 +88,8 @@ def test_telegram_outbound_no_keyboard_for_morning_digest(tmp_path):
         "tradingagents.delivery.telegram._get_bot", return_value=fake_bot
     ), patch.dict("os.environ", {"IIC_TELEGRAM_BOT_TOKEN": "tok"}):
         ch = TelegramOutbound(conn=conn, config=cfg)
-        ch.send(
+        # The delivery worker owns attempts for queued digests.
+        ch.send_attempt(
             brief={"brief_id": "b2", "mode": "morning_digest"},
             mode="morning_digest",
             body="DIGEST TEXT",

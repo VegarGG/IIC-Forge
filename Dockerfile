@@ -24,6 +24,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
 COPY cli ./cli
 COPY tradingagents ./tradingagents
+COPY docker/entrypoint.sh /app/docker-entrypoint.sh
 
 RUN uv sync \
     --frozen \
@@ -62,7 +63,10 @@ RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
 WORKDIR /app
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /app/model-cache /app/model-cache
+COPY --from=builder --chown=appuser:appuser /app/docker-entrypoint.sh /app/docker-entrypoint.sh
+
+RUN chmod 0555 /app/docker-entrypoint.sh
 
 USER appuser
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["iic-forge"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

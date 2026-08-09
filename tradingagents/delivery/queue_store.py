@@ -68,9 +68,9 @@ def enqueue_alert(
     now: Optional[datetime] = None,
     commit: bool = True,
 ) -> int:
-    """Persist one alert/channel intent, returning the stable queue row id."""
-    if mode not in {"event_alert", "event_alert_light"}:
-        raise ValueError(f"delivery outbox only accepts alert modes, got {mode!r}")
+    """Persist one outbound/channel intent, returning the stable queue row id."""
+    if mode not in {"event_alert", "event_alert_light", "morning_digest"}:
+        raise ValueError(f"delivery outbox does not accept mode {mode!r}")
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
     created = (now or _utc_now()).astimezone(timezone.utc)

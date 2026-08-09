@@ -154,6 +154,7 @@ def insert_event(
     status: str,
     deduped_of: Optional[str],
     salience_source: Optional[str] = None,
+    commit: bool = True,
 ) -> None:
     """Insert one events row.
 
@@ -168,7 +169,8 @@ def insert_event(
         (event_id, source, ingested_ts, salience, raw_path, deduped_of,
          status, salience_source),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def insert_event_ticker(
@@ -177,13 +179,15 @@ def insert_event_ticker(
     event_id: str,
     ticker: str,
     confidence: Optional[float],
+    commit: bool = True,
 ) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO event_ticker (event_id, ticker, confidence) "
         "VALUES (?, ?, ?)",
         (event_id, ticker, confidence),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def upsert_watchlist(
@@ -192,6 +196,7 @@ def upsert_watchlist(
     ticker: str,
     ttl_until: Optional[str],
     tags: Iterable[str],
+    commit: bool = True,
 ) -> None:
     """Insert or update a watchlist row.
 
@@ -218,7 +223,8 @@ def upsert_watchlist(
             "WHERE ticker = ?",
             (now, ttl_until, json.dumps(merged), ticker),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_active_watchlist(conn: sqlite3.Connection) -> list[str]:
@@ -270,13 +276,15 @@ def insert_event_fingerprint(
     kind: str,
     event_id: str,
     source: str,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO event_fingerprints "
         "(fingerprint, kind, event_id, source, created_ts) VALUES (?, ?, ?, ?, ?)",
         (fingerprint, kind, event_id, source, _now_iso()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def insert_event_embedding(
@@ -284,13 +292,15 @@ def insert_event_embedding(
     *,
     event_id: str,
     vec_id: int,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         "INSERT INTO event_embeddings (event_id, vec_id, created_ts) "
         "VALUES (?, ?, ?)",
         (event_id, vec_id, _now_iso()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def insert_alert_evaluation(

@@ -23,8 +23,9 @@ def test_default_config_has_f3_keys():
     # Adapter enablement (X off by default — see spec D8/R-F3-3)
     assert C["sensing_adapters_enabled"] == {
         "polygon_news": True, "telegram": True, "rss": True,
-        "gdelt": True, "macro": True, "x": False,
+        "gdelt": False, "macro": False, "x": False,
     }
+    assert C["sensing_require_aof_fsync"] is True
     # Salience cache
     assert C["sensing_salience_cache_ttl_seconds"] == 86400
     # Watchlist refresh inside triage consumer

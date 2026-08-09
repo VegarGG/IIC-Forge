@@ -1,6 +1,6 @@
-"""Persistent alert-delivery worker.
+"""Persistent outbound-delivery worker.
 
-The Secretary only enqueues event alerts. This worker owns transport attempts,
+The Secretary enqueues event alerts and morning digests. This worker owns transport attempts,
 quiet-hours release, retry/backoff, lease recovery, and terminal dead-letter
 state. A crash after a provider accepts a message but before SQLite records the
 acknowledgement can still produce a duplicate on retry; transports do not offer

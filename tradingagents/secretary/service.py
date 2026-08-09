@@ -1,8 +1,4 @@
-"""Secretary service.
-
-F1 ships ``compose_deep_dive`` end-to-end. F4 ships ``compose_event_alert``.
-Morning digest is stubbed — lands in F5.
-"""
+"""Stateful brief composition and durable delivery-intent creation."""
 
 from __future__ import annotations
 
@@ -566,10 +562,27 @@ class Secretary:
 
     # ----- F5: morning digest -----
     def compose_morning_digest(
-        self, *, watchlist: List[str] | None, ts: str,
+        self,
+        *,
+        watchlist: List[str] | None,
+        ts: str,
+        brief_id: Optional[str] = None,
+        deliver: bool = False,
     ) -> str:
         from tradingagents.default_config import DEFAULT_CONFIG
         from tradingagents.secretary.morning import run_one_ticker
+
+        resolved_brief_id = brief_id or uuid.uuid4().hex
+        existing = self._conn.execute(
+            "SELECT mode FROM briefs WHERE brief_id = ?", (resolved_brief_id,)
+        ).fetchone()
+        if existing is not None:
+            if existing["mode"] != "morning_digest":
+                raise ValueError(
+                    f"brief id {resolved_brief_id!r} is already used by "
+                    f"mode {existing['mode']!r}"
+                )
+            return resolved_brief_id
 
         if watchlist is None:
             rows = self._conn.execute(
@@ -608,13 +621,12 @@ class Secretary:
                     "recommendation": "(data error)",
                 })
 
-        brief_id = uuid.uuid4().hex
-        brief_path = self._data_dir / "briefs" / f"{brief_id}.md"
+        brief_path = self._data_dir / "briefs" / f"{resolved_brief_id}.md"
         brief_path.parent.mkdir(parents=True, exist_ok=True)
 
         body_lines = [
             f"# Morning Digest — {ts[:10]}",
-            f"_brief: `{brief_id}` · {len(watchlist)} ticker(s)_",
+            f"_brief: `{resolved_brief_id}` · {len(watchlist)} ticker(s)_",
             "",
         ]
         for sec in per_ticker_sections:
@@ -630,16 +642,76 @@ class Secretary:
             ]
         brief_path.write_text("\n".join(body_lines))
 
-        store.insert_brief(
-            self._conn,
-            brief_id=brief_id,
-            mode="morning_digest",
-            scope=json.dumps(list(watchlist)),
-            generated_ts=ts,
-            content_path=str(brief_path.relative_to(self._data_dir)),
-            run_ids=all_run_ids,
-        )
-        return brief_id
+        with self._conn:
+            store.insert_brief(
+                self._conn,
+                brief_id=resolved_brief_id,
+                mode="morning_digest",
+                scope=json.dumps(list(watchlist)),
+                generated_ts=ts,
+                content_path=str(brief_path.relative_to(self._data_dir)),
+                run_ids=all_run_ids,
+                commit=False,
+            )
+            if deliver:
+                self._deliver_morning_digest(
+                    brief_id=resolved_brief_id,
+                    generated_ts=ts,
+                    per_ticker_sections=per_ticker_sections,
+                    commit=False,
+                )
+        return resolved_brief_id
+
+    def _deliver_morning_digest(
+        self,
+        *,
+        brief_id: str,
+        generated_ts: str,
+        per_ticker_sections: List[Dict[str, str]],
+        commit: bool = True,
+    ) -> None:
+        """Atomically enqueue the scheduled digest for every enabled channel."""
+        from tradingagents.default_config import DEFAULT_CONFIG
+        from tradingagents.delivery import queue_store as delivery_queue
+        from tradingagents.delivery.render import render_for_channel
+
+        config = dict(DEFAULT_CONFIG)
+        brief = {
+            "brief_id": brief_id,
+            "mode": "morning_digest",
+            "scope": ", ".join(
+                section["ticker"] for section in per_ticker_sections
+            ),
+            "generated_ts": generated_ts,
+            "tickers": per_ticker_sections,
+        }
+        names = list(config["delivery"]["enabled_channels"])
+        rendered = {
+            name: render_for_channel(
+                channel=name, mode="morning_digest", brief=brief
+            )
+            for name in names
+        }
+
+        def _enqueue() -> None:
+            for name, body in rendered.items():
+                delivery_queue.enqueue_alert(
+                    self._conn,
+                    brief_id=brief_id,
+                    channel=name,
+                    mode="morning_digest",
+                    brief_payload=brief,
+                    body=body,
+                    quiet_hours=config["delivery"]["quiet_hours"],
+                    max_attempts=int(config["delivery"]["queue_max_attempts"]),
+                    commit=False,
+                )
+
+        if commit:
+            with self._conn:
+                _enqueue()
+        else:
+            _enqueue()
 
     # ----- F5: refinement -----
     def compose_refinement(

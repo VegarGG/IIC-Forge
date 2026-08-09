@@ -1,0 +1,258 @@
+name: ${IIC_COMPOSE_PROJECT_NAME:-iic-forge}
+
+x-app-common: &app-common
+  image: ${IIC_IMAGE:-iic-forge:0.2.5}
+  build:
+    context: .
+    args:
+      APP_VERSION: "0.2.5"
+  env_file:
+    - ${IIC_ENV_FILE:-.env.production}
+  environment:
+    HOME: /home/appuser
+    TRADINGAGENTS_IIC_DB_PATH: /data/iic.db
+    TRADINGAGENTS_IIC_DATA_DIR: /data
+    TRADINGAGENTS_RESULTS_DIR: /data/logs
+    TRADINGAGENTS_CACHE_DIR: /data/cache
+    TRADINGAGENTS_MEMORY_LOG_PATH: /data/memory/trading_memory.md
+    TRADINGAGENTS_SENSING_REDIS_URL: redis://redis:6379/0
+    TRADINGAGENTS_SENSING_REQUIRE_AOF_FSYNC: "true"
+    TRADINGAGENTS_ORCHESTRATOR_ENABLED: "true"
+    TELEGRAM_SENSING_SESSION: /data/telegram/iic_sensing
+    IIC_SMTP_ENABLED: "true"
+    TZ: Asia/Shanghai
+  secrets:
+    - deepseek_api_key
+    - polygon_api_key
+    - telegram_api_id
+    - telegram_api_hash
+    - telegram_bot_token
+    - smtp_user
+    - smtp_app_password
+  volumes:
+    - iic-data:/data
+  networks:
+    - backend
+  user: "1000:1000"
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=256m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  pids_limit: 512
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+  healthcheck:
+    test:
+      - CMD
+      - iic-forge
+      - forge
+      - runtime
+      - health
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    start_period: 90s
+
+x-runtime-dependencies: &runtime-dependencies
+  redis:
+    condition: service_healthy
+  database-init:
+    condition: service_completed_successfully
+  ticker-seed:
+    condition: service_completed_successfully
+
+services:
+  redis:
+    image: ${IIC_REDIS_IMAGE:-redis:7.4.7-alpine3.21}
+    command:
+      - redis-server
+      - /etc/redis/redis.conf
+    volumes:
+      - iic-redis:/data
+      - ./ops/redis/redis.conf:/etc/redis/redis.conf:ro
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    mem_limit: 384m
+    pids_limit: 128
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  volume-init:
+    image: ${IIC_IMAGE:-iic-forge:0.2.5}
+    build:
+      context: .
+      args:
+        APP_VERSION: "0.2.5"
+    user: "0:0"
+    entrypoint: [/usr/bin/chown]
+    command: [-R, "1000:1000", /data]
+    volumes:
+      - iic-data:/data
+    networks:
+      - backend
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  database-init:
+    <<: *app-common
+    command: [forge, runtime, init, --require-production-config]
+    depends_on:
+      redis:
+        condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+    restart: "no"
+    healthcheck:
+      disable: true
+
+  scheduler:
+    <<: *app-common
+    command: [forge, runtime, run, scheduler]
+    depends_on: *runtime-dependencies
+    mem_limit: 512m
+    cpus: 0.25
+    stop_grace_period: 45s
+
+  ticker-seed:
+    <<: *app-common
+    command: [forge, sense, reseed-tickers]
+    depends_on:
+      redis:
+        condition: service_healthy
+      database-init:
+        condition: service_completed_successfully
+    restart: "on-failure:5"
+    healthcheck:
+      disable: true
+
+  sense-rss:
+    <<: *app-common
+    command: [forge, runtime, run, rss]
+    depends_on: *runtime-dependencies
+    mem_limit: 512m
+    cpus: 0.50
+
+  sense-telegram:
+    <<: *app-common
+    command: [forge, runtime, run, telegram-ingest]
+    depends_on: *runtime-dependencies
+    mem_limit: 512m
+    cpus: 0.50
+    stop_grace_period: 30s
+
+  sense-polygon:
+    <<: *app-common
+    command: [forge, runtime, run, polygon]
+    depends_on: *runtime-dependencies
+    mem_limit: 512m
+    cpus: 0.50
+
+  triage:
+    <<: *app-common
+    command: [forge, runtime, run, triage]
+    depends_on: *runtime-dependencies
+    mem_limit: 3g
+    cpus: 1.50
+    pids_limit: 1024
+    stop_grace_period: 30s
+
+  promoter:
+    <<: *app-common
+    command: [forge, orchestrator, promoter]
+    depends_on: *runtime-dependencies
+    mem_limit: 512m
+    cpus: 0.50
+
+  analysis-worker:
+    <<: *app-common
+    command: [forge, orchestrator, worker]
+    depends_on: *runtime-dependencies
+    mem_limit: 8g
+    cpus: 2.00
+    pids_limit: 2048
+    stop_grace_period: 30s
+
+  delivery-worker:
+    <<: *app-common
+    command: [forge, delivery, worker]
+    depends_on: *runtime-dependencies
+    mem_limit: 512m
+    cpus: 0.50
+
+  telegram-bot:
+    <<: *app-common
+    command: [forge, runtime, run, telegram-bot]
+    depends_on: *runtime-dependencies
+    mem_limit: 512m
+    cpus: 0.50
+    stop_grace_period: 30s
+
+  action-handler:
+    <<: *app-common
+    command: [forge, action-handler, run]
+    depends_on: *runtime-dependencies
+    mem_limit: 1g
+    cpus: 0.75
+    stop_grace_period: 30s
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  iic-data:
+    name: ${IIC_DATA_VOLUME:-iic-forge-data}
+  iic-redis:
+    name: ${IIC_REDIS_VOLUME:-iic-forge-redis}
+
+secrets:
+  deepseek_api_key:
+    file: ${IIC_SECRETS_DIR:-./secrets}/deepseek_api_key
+  polygon_api_key:
+    file: ${IIC_SECRETS_DIR:-./secrets}/polygon_api_key
+  telegram_api_id:
+    file: ${IIC_SECRETS_DIR:-./secrets}/telegram_api_id
+  telegram_api_hash:
+    file: ${IIC_SECRETS_DIR:-./secrets}/telegram_api_hash
+  telegram_bot_token:
+    file: ${IIC_SECRETS_DIR:-./secrets}/telegram_bot_token
+  smtp_user:
+    file: ${IIC_SECRETS_DIR:-./secrets}/smtp_user
+  smtp_app_password:
+    file: ${IIC_SECRETS_DIR:-./secrets}/smtp_app_password
