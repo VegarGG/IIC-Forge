@@ -101,12 +101,26 @@ def test_stale_token_cannot_complete_released_job(conn):
     now = datetime(2026, 8, 8, 1, 0, tzinfo=timezone.utc)
     job_id = _insert(conn, available=now)
     first = queue_store.lease_one(conn, lease_seconds=10, now=now)
+    queue_store.set_worker_pid(
+        conn,
+        job_id=job_id,
+        lease_token=first["lease_token"],
+        worker_pid=4242,
+    )
     assert queue_store.sweep_stale_leases(
         conn, max_age_seconds=3600, now=now + timedelta(seconds=9)
     ) == 0
     assert queue_store.sweep_stale_leases(
         conn, max_age_seconds=3600, now=now + timedelta(seconds=11)
     ) == 1
+
+    recovered = conn.execute(
+        "SELECT state, worker_pid, error_category FROM queue_jobs WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+    assert recovered["state"] == "queued"
+    assert recovered["worker_pid"] is None
+    assert recovered["error_category"] == "lease_expired"
 
     with pytest.raises(queue_store.QueueLeaseLost):
         queue_store.mark_done(
@@ -116,6 +130,13 @@ def test_stale_token_cannot_complete_released_job(conn):
             brief_id=None,
             cost_usd=0,
             lease_token=first["lease_token"],
+        )
+    with pytest.raises(queue_store.QueueLeaseLost):
+        queue_store.set_worker_pid(
+            conn,
+            job_id=job_id,
+            lease_token=first["lease_token"],
+            worker_pid=4343,
         )
 
 

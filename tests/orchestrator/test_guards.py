@@ -83,7 +83,8 @@ def test_budget_disabled_never_blocks(conn):
     qs.insert_queue_job(conn, job_type="event_alert",
                         payload="{}", trigger_event_id="ev1")
     job = qs.lease_one(conn)
-    qs.mark_done(conn, job_id=job["job_id"], run_ids=[], brief_id=None, cost_usd=10.0)
+    qs.mark_done(conn, job_id=job["job_id"], run_ids=[], brief_id=None,
+                 cost_usd=10.0, lease_token=job["lease_token"])
     assert g.gate(conn) is True
 
 
@@ -97,5 +98,6 @@ def test_budget_enabled_blocks_after_threshold(conn):
                             payload="{}", trigger_event_id="ev1")
         job = qs.lease_one(conn)
         qs.mark_done(conn, job_id=job["job_id"], run_ids=[],
-                     brief_id=None, cost_usd=1.0)
+                     brief_id=None, cost_usd=1.0,
+                     lease_token=job["lease_token"])
     assert g.gate(conn) is False

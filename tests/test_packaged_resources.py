@@ -11,6 +11,7 @@ def test_packaged_text_and_yaml_resources_are_readable():
     assert [migration.name for migration in migrations] == [
         "baseline",
         "queue_lifecycle",
+        "analysis_worker_process",
     ]
     assert "CREATE TABLE" in migrations[0].sql
     persona = load_packaged_persona("balanced")

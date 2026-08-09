@@ -2,7 +2,8 @@
 
 Jobs are delivered at least once. Enqueue is optionally idempotent, leases are
 fenced with an opaque token, failures retry with bounded exponential backoff,
-and exhausted jobs remain visible in the terminal ``error`` state.
+permanent failures remain ``blocked``, and exhausted jobs remain visible in
+the terminal ``error`` state.
 """
 
 from __future__ import annotations
@@ -108,6 +109,7 @@ def lease_one(
                SET state = 'running',
                    started_ts = ?,
                    finished_ts = NULL,
+                   worker_pid = NULL,
                    lease_token = ?,
                    lease_expires_ts = ?,
                    attempt_count = attempt_count + 1
@@ -121,7 +123,7 @@ def lease_one(
              )
          RETURNING job_id, job_type, payload, trigger_event_id, state,
                    started_ts, attempt_count, max_attempts, lease_token,
-                   lease_expires_ts, idempotency_key
+                   lease_expires_ts, idempotency_key, brief_id
             """,
             (claimed_iso, lease_token, lease_expires, claimed_iso),
         ).fetchone()
@@ -135,24 +137,29 @@ def mark_done(
     run_ids: Iterable[str],
     brief_id: Optional[str],
     cost_usd: Optional[float],
-    lease_token: Optional[str] = None,
+    lease_token: str,
+    exit_code: int = 0,
 ) -> None:
     sql = (
         "UPDATE queue_jobs SET state = 'done', finished_ts = ?, "
         "run_ids = ?, brief_id = ?, cost_usd = ?, error = NULL, "
+        "error_category = NULL, worker_pid = NULL, last_exit_code = ?, "
         "lease_token = NULL, lease_expires_ts = NULL WHERE job_id = ? "
-        "AND state = 'running'"
+        "AND state = 'running' AND lease_token = ?"
     )
     params: tuple = (
-        _now_iso(), json.dumps(list(run_ids)), brief_id, cost_usd, job_id,
+        _now_iso(),
+        json.dumps(list(run_ids)),
+        brief_id,
+        cost_usd,
+        exit_code,
+        job_id,
+        lease_token,
     )
-    if lease_token is not None:
-        # The opaque token is the fence. A worker may finish just after the
-        # nominal expiry as long as no sweeper/new worker has replaced its
-        # lease. This ordering avoids unnecessary duplicate side effects at
-        # the lease boundary while still rejecting every superseded worker.
-        sql += " AND lease_token = ?"
-        params += (lease_token,)
+    # The opaque token is the fence. A worker may finish just after the nominal
+    # expiry as long as no sweeper/new worker has replaced its lease. This
+    # ordering avoids unnecessary duplicate side effects at the lease boundary
+    # while still rejecting every superseded worker.
     changed = conn.execute(sql, params).rowcount
     conn.commit()
     if changed != 1:
@@ -167,6 +174,9 @@ def mark_failure(
     lease_token: str,
     retry_base_seconds: int = 30,
     retry_cap_seconds: int = 900,
+    retryable: bool = True,
+    error_category: str = "runtime_error",
+    exit_code: Optional[int] = None,
     now: Optional[datetime] = None,
 ) -> str:
     """Record a failed attempt and return the resulting state.
@@ -188,19 +198,27 @@ def mark_failure(
                 f"queue job {job_id} is no longer owned by this worker"
             )
         exhausted = int(row["attempt_count"]) >= int(row["max_attempts"])
-        if exhausted:
+        if not retryable:
+            state = "blocked"
+            available_ts = failed_at.isoformat()
+            finished_ts = failed_at.isoformat()
+            blocked_ts: Optional[str] = failed_at.isoformat()
+        elif exhausted:
             state = "error"
             available_ts = failed_at.isoformat()
-            finished_ts: Optional[str] = failed_at.isoformat()
+            finished_ts = failed_at.isoformat()
+            blocked_ts = None
         else:
             state = "queued"
             exponent = max(int(row["attempt_count"]) - 1, 0)
             delay = min(retry_base_seconds * (2 ** exponent), retry_cap_seconds)
             available_ts = (failed_at + timedelta(seconds=delay)).isoformat()
             finished_ts = None
+            blocked_ts = None
         changed = conn.execute(
             "UPDATE queue_jobs SET state = ?, available_ts = ?, finished_ts = ?, "
-            "error = ?, last_error_ts = ?, lease_token = NULL, "
+            "error = ?, error_category = ?, last_error_ts = ?, blocked_ts = ?, "
+            "worker_pid = NULL, last_exit_code = ?, lease_token = NULL, "
             "lease_expires_ts = NULL WHERE job_id = ? AND state = 'running' "
             "AND lease_token = ?",
             (
@@ -208,7 +226,10 @@ def mark_failure(
                 available_ts,
                 finished_ts,
                 error_msg[:2000],
+                error_category[:120],
                 failed_at.isoformat(),
+                blocked_ts,
+                exit_code,
                 job_id,
                 lease_token,
             ),
@@ -229,7 +250,8 @@ def mark_error(
     """Administrative terminal failure retained for backwards compatibility."""
     changed = conn.execute(
         "UPDATE queue_jobs SET state = 'error', finished_ts = ?, error = ?, "
-        "last_error_ts = ?, lease_token = NULL, lease_expires_ts = NULL "
+        "error_category = 'administrative', last_error_ts = ?, worker_pid = NULL, "
+        "lease_token = NULL, lease_expires_ts = NULL "
         "WHERE job_id = ? AND state IN ('queued', 'running')",
         (_now_iso(), error_msg[:2000], _now_iso(), job_id),
     ).rowcount
@@ -287,7 +309,8 @@ def sweep_stale_leases(
         "UPDATE queue_jobs SET "
         "state = CASE WHEN attempt_count >= max_attempts THEN 'error' ELSE 'queued' END, "
         "finished_ts = CASE WHEN attempt_count >= max_attempts THEN ? ELSE NULL END, "
-        "available_ts = ?, error = ?, last_error_ts = ?, "
+        "available_ts = ?, error = ?, error_category = 'lease_expired', "
+        "last_error_ts = ?, worker_pid = NULL, "
         "lease_token = NULL, lease_expires_ts = NULL "
         "WHERE state = 'running' AND ("
         "(lease_expires_ts IS NOT NULL AND datetime(lease_expires_ts) <= datetime(?)) "
@@ -304,18 +327,42 @@ def retry_error_job(
     *,
     job_id: int,
     additional_attempts: int = 1,
+    operator_note: str = "manual operator retry",
     now: Optional[datetime] = None,
 ) -> bool:
-    """Operator-controlled replay of one terminal job."""
+    """Operator-controlled replay of one exhausted or blocked job."""
     if additional_attempts < 1:
         raise ValueError("additional_attempts must be at least 1")
+    if not operator_note.strip():
+        raise ValueError("operator_note must not be empty")
     available = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     changed = conn.execute(
         "UPDATE queue_jobs SET state = 'queued', available_ts = ?, "
         "finished_ts = NULL, max_attempts = attempt_count + ?, "
+        "operator_note = ?, blocked_ts = NULL, worker_pid = NULL, "
         "lease_token = NULL, lease_expires_ts = NULL "
-        "WHERE job_id = ? AND state = 'error'",
-        (available.isoformat(), additional_attempts, job_id),
+        "WHERE job_id = ? AND state IN ('error', 'blocked')",
+        (available.isoformat(), additional_attempts, operator_note[:1000], job_id),
     ).rowcount
     conn.commit()
     return changed == 1
+
+
+def set_worker_pid(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    lease_token: str,
+    worker_pid: int,
+) -> None:
+    """Attach the isolated child PID to the active fenced lease."""
+    if worker_pid < 1:
+        raise ValueError("worker_pid must be positive")
+    changed = conn.execute(
+        "UPDATE queue_jobs SET worker_pid = ? WHERE job_id = ? "
+        "AND state = 'running' AND lease_token = ?",
+        (worker_pid, job_id, lease_token),
+    ).rowcount
+    conn.commit()
+    if changed != 1:
+        raise QueueLeaseLost(f"queue job {job_id} is no longer owned by this worker")

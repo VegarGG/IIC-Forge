@@ -1,6 +1,5 @@
 import json
 import pytest
-from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -104,14 +103,48 @@ def test_dispatch_event_alert_cost_rollup(setup):
 
 @pytest.mark.unit
 def test_dispatch_unknown_job_type_raises(setup):
-    from tradingagents.orchestrator.dispatch import dispatch
+    from tradingagents.orchestrator.dispatch import JobBlockedError, dispatch
 
     conn, data_dir = setup
     sec = MagicMock()
     job = {"job_id": 1, "job_type": "morning_digest", "payload": "{}",
            "trigger_event_id": None}
-    with pytest.raises(ValueError, match="unknown job_type"):
+    with pytest.raises(JobBlockedError, match="unknown job_type") as exc_info:
         dispatch(conn, job, secretary=sec)
+    assert exc_info.value.category == "unknown_job_type"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("payload", ["not-json", "[]", "{}"])
+def test_dispatch_invalid_payload_is_permanently_classified(setup, payload):
+    from tradingagents.orchestrator.dispatch import JobBlockedError, dispatch
+
+    conn, _data_dir = setup
+    job = {
+        "job_id": 1,
+        "job_type": "event_alert",
+        "payload": payload,
+        "trigger_event_id": "ev1",
+    }
+    with pytest.raises(JobBlockedError) as exc_info:
+        dispatch(conn, job, secretary=MagicMock())
+    assert exc_info.value.category == "invalid_payload"
+
+
+@pytest.mark.unit
+def test_dispatch_missing_event_is_permanently_classified(setup):
+    from tradingagents.orchestrator.dispatch import JobBlockedError, dispatch
+
+    conn, _data_dir = setup
+    job = {
+        "job_id": 1,
+        "job_type": "event_alert",
+        "payload": json.dumps({"event_id": "gone", "ticker": "AAPL"}),
+        "trigger_event_id": "gone",
+    }
+    with pytest.raises(JobBlockedError) as exc_info:
+        dispatch(conn, job, secretary=MagicMock())
+    assert exc_info.value.category == "missing_event"
 
 
 @pytest.mark.unit

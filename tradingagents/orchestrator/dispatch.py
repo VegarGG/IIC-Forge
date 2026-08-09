@@ -15,6 +15,37 @@ from typing import Any, Dict
 log = logging.getLogger(__name__)
 
 
+class JobBlockedError(ValueError):
+    """A job cannot succeed without operator/configuration correction."""
+
+    def __init__(self, message: str, *, category: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def _event_alert_payload(raw_payload: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw_payload)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise JobBlockedError(
+            "event_alert payload is not valid JSON",
+            category="invalid_payload",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise JobBlockedError(
+            "event_alert payload must be a JSON object",
+            category="invalid_payload",
+        )
+    for field in ("event_id", "ticker"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise JobBlockedError(
+                f"event_alert payload requires non-empty {field}",
+                category="invalid_payload",
+            )
+    return payload
+
+
 def dispatch_event_alert(
     conn: sqlite3.Connection,
     job: Dict[str, Any],
@@ -23,12 +54,20 @@ def dispatch_event_alert(
 ) -> Dict[str, Any]:
     """Run an event_alert job. Returns the rollup dict the worker writes
     into queue_jobs (brief_id, run_ids JSON, cost_usd)."""
-    payload = json.loads(job["payload"])
+    payload = _event_alert_payload(job["payload"])
     event_id = payload["event_id"]
     ticker = payload["ticker"]
     action_id = payload.get("action_id")
     parent_brief_id = payload.get("parent_brief_id")
     job_id = job["job_id"]
+
+    if conn.execute(
+        "SELECT 1 FROM events WHERE event_id = ?", (event_id,)
+    ).fetchone() is None:
+        raise JobBlockedError(
+            f"event_alert references missing event {event_id!r}",
+            category="missing_event",
+        )
 
     # Link the full brief back to the light alert for the same event, if any.
     if not parent_brief_id:
@@ -93,5 +132,8 @@ def dispatch(
 ) -> Dict[str, Any]:
     handler = DISPATCH.get(job["job_type"])
     if handler is None:
-        raise ValueError(f"unknown job_type: {job['job_type']!r}")
+        raise JobBlockedError(
+            f"unknown job_type: {job['job_type']!r}",
+            category="unknown_job_type",
+        )
     return handler(conn, job, secretary=secretary)

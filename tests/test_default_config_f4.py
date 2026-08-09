@@ -17,6 +17,9 @@ def test_default_config_has_f4_keys():
     assert C["worker_poll_interval_s"] == 2
     assert C["worker_job_timeout_min"] == 20
     assert C["max_concurrent_jobs"] == 1
+    assert C["worker_process_start_method"] == "spawn"
+    assert C["worker_process_poll_seconds"] == 0.5
+    assert C["worker_process_terminate_grace_seconds"] == 5.0
     # Cost guards — all off
     assert C["trigger_backpressure_enabled"] is False
     assert C["trigger_backpressure_max_pending"] == 20

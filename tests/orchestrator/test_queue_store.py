@@ -57,7 +57,7 @@ def test_mark_done_records_outputs(conn):
                      payload="{}", trigger_event_id="ev1")
     job = lease_one(conn)
     mark_done(conn, job_id=job["job_id"], run_ids=["r1", "r2"],
-              brief_id=None, cost_usd=0.45)
+              brief_id=None, cost_usd=0.45, lease_token=job["lease_token"])
     row = conn.execute("SELECT * FROM queue_jobs WHERE job_id=?", (job["job_id"],)).fetchone()
     assert row["state"] == "done"
     # brief_id may be None (FK enforcement); we pass None here to avoid the FK
@@ -108,7 +108,8 @@ def test_daily_cost_total_sums_done_jobs(conn):
     for _ in range(3):
         insert_queue_job(conn, job_type="event_alert", payload="{}", trigger_event_id="ev1")
         job = lease_one(conn)
-        mark_done(conn, job_id=job["job_id"], run_ids=[], brief_id=None, cost_usd=1.25)
+        mark_done(conn, job_id=job["job_id"], run_ids=[], brief_id=None,
+                  cost_usd=1.25, lease_token=job["lease_token"])
     assert daily_cost_total(conn) == pytest.approx(3.75)
 
 

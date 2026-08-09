@@ -33,6 +33,49 @@ def test_worker_sweeps_stale_leases_on_boot(tmp_path):
 
 
 @pytest.mark.unit
+def test_single_worker_restart_immediately_reclaims_predecessor_lease(tmp_path):
+    """Boot uses age zero because only one worker parent is supported."""
+    from tradingagents.orchestrator.worker import boot_sweep
+
+    db = str(tmp_path / "iic.db")
+    conn = connect(db)
+    store.insert_event(
+        conn,
+        event_id="ev1",
+        source="rss",
+        ingested_ts=datetime.now(timezone.utc).isoformat(),
+        salience=0.9,
+        raw_path=None,
+        status="triaged",
+        deduped_of=None,
+    )
+    queue_store.insert_queue_job(
+        conn,
+        job_type="event_alert",
+        payload="{}",
+        trigger_event_id="ev1",
+    )
+    job = queue_store.lease_one(conn, lease_seconds=600)
+    queue_store.set_worker_pid(
+        conn,
+        job_id=job["job_id"],
+        lease_token=job["lease_token"],
+        worker_pid=4242,
+    )
+
+    assert boot_sweep(conn, max_age_seconds=0) == 1
+    row = conn.execute(
+        "SELECT state, worker_pid, error_category FROM queue_jobs WHERE job_id = ?",
+        (job["job_id"],),
+    ).fetchone()
+    assert dict(row) == {
+        "state": "queued",
+        "worker_pid": None,
+        "error_category": "lease_expired",
+    }
+
+
+@pytest.mark.unit
 def test_sweep_reclaims_same_day_iso_t_started_ts(tmp_path):
     """Regression (S-4): lease_one writes started_ts via datetime.isoformat()
     ('T' separator + '+00:00' offset). The sweep must wrap the column in

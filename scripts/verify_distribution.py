@@ -24,6 +24,7 @@ REQUIRED_PACKAGE_FILES = {
     "tradingagents/delivery/templates/telegram/morning_digest.j2",
     "tradingagents/persistence/migrations/0001_baseline.sql",
     "tradingagents/persistence/migrations/0002_queue_lifecycle.sql",
+    "tradingagents/persistence/migrations/0003_analysis_worker_process.sql",
     "tradingagents/personas/balanced.yaml",
     "tradingagents/personas/macro.yaml",
     "tradingagents/personas/momentum.yaml",

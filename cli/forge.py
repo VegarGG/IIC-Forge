@@ -165,32 +165,50 @@ def orchestrator_status() -> None:
 
     rows = list(conn.execute(
         "SELECT job_id, job_type, state, enqueued_ts, finished_ts, "
-        "brief_id, cost_usd, error "
+        "brief_id, cost_usd, error, error_category, worker_pid, operator_note "
         "FROM queue_jobs ORDER BY job_id DESC LIMIT 10"
     ))
     if not rows:
         console.print("(no jobs)")
         return
-    t = Table("id", "type", "state", "enqueued", "finished", "brief", "$", "err")
+    t = Table(
+        "id", "type", "state", "pid", "category", "enqueued", "finished",
+        "brief", "$", "err/note",
+    )
     for r in rows:
         t.add_row(
             str(r["job_id"]), r["job_type"], r["state"],
+            str(r["worker_pid"] or ""),
+            (r["error_category"] or "")[:20],
             (r["enqueued_ts"] or "")[:19],
             (r["finished_ts"] or "")[:19],
             (r["brief_id"] or "")[:8],
             f"{(r['cost_usd'] or 0.0):.4f}",
-            (r["error"] or "")[:40],
+            (r["operator_note"] or r["error"] or "")[:40],
         )
     console.print(t)
 
 
 @orch_app.command("retry")
-def orchestrator_retry(job_id: int) -> None:
-    """Give one terminal analysis job one additional attempt."""
+def orchestrator_retry(
+    job_id: int,
+    note: str = typer.Option(
+        "manual operator retry",
+        "--note",
+        help="Audit note explaining why this job is being requeued.",
+    ),
+) -> None:
+    """Give one exhausted or blocked analysis job one additional attempt."""
     from tradingagents.orchestrator import queue_store
 
-    if not queue_store.retry_error_job(_conn(), job_id=job_id):
-        raise typer.BadParameter(f"job {job_id} is not in terminal error state")
+    if not note.strip():
+        raise typer.BadParameter("--note must not be empty")
+    if not queue_store.retry_error_job(
+        _conn(), job_id=job_id, operator_note=note
+    ):
+        raise typer.BadParameter(
+            f"job {job_id} is not in error or blocked state"
+        )
     console.print(f"[green]requeued[/green] analysis job {job_id}")
 
 

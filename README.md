@@ -184,7 +184,7 @@ tradingagents forge sense sweep-watchlist      # TTL prune
 
 # Orchestrator
 tradingagents forge orchestrator status        # queue + recent jobs
-tradingagents forge orchestrator retry <job-id> # one additional terminal-job attempt
+tradingagents forge orchestrator retry <job-id> --note "reason for replay"
 python scripts/f4_f5_exit_gate.py --since 2026-06-03T09:00:00Z --window-hours 12
 
 # Durable alert delivery
@@ -235,6 +235,10 @@ Notable tunables in `default_config.py`:
 | `alert_pending_ttl_hours` | `24` | how long a pending approval stays valid |
 | `delivery.quiet_hours.timezone` | `Asia/Shanghai` | alert quiet-hours clock (22:00-07:00) |
 | `delivery.queue_max_attempts` | `5` | bounded Telegram/email attempts before `dead` |
+| `worker_job_timeout_min` | `20` | hard wall-clock limit; the isolated analysis process is terminated before retry |
+| `worker_process_start_method` | `spawn` | clean child-process start method for every analysis attempt |
+| `queue_retry_base_seconds` / `queue_retry_cap_seconds` | `30` / `900` | bounded exponential retry delay for transient analysis failures |
+| `queue_lease_margin_seconds` | `300` | fence margin beyond the hard process timeout |
 | `market_data_stale_after_seconds` | `900` | snapshot freshness TTL for same-day market data |
 | `market_data_cache_ttl_seconds` | `900` | same-day OHLCV cache TTL; historical cache files are reused |
 | cost / rate guards | `enabled=False` | coded but off through F0–F5 (measure first) |
@@ -316,9 +320,10 @@ sudo systemctl start iic-telegram-bot
   Recommendation; the divergence section is never averaged away.
 - **Cost guards ship disabled** — rate/budget guards are coded but
   `enabled=False` through F0–F5: measure first, enforce later.
-- **Everything is resumable** — sensing cursors, orchestrator job leases, and
-  idempotent writes let any unit restart without duplicate work; the worker
-  honors stop signals promptly mid-job.
+- **Everything is resumable** — sensing cursors, fenced orchestrator leases,
+  and idempotent writes let any unit restart without losing queued work; each
+  analysis attempt runs in a child process that is hard-terminated on timeout
+  or shutdown before its lease is retried.
 - **Prompt-cache aware** — LLM prompts keep a byte-stable instruction prefix
   (variable context at the tail) to maximize DeepSeek prefix-cache reuse; token
   usage and cache hit/miss are recorded to the `costs` table.
