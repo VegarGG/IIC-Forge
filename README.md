@@ -154,7 +154,7 @@ Telegram callbacks, and the action handler.
 cp .env.production.example .env.production
 chmod 0600 .env.production
 install -d -m 0700 secrets
-# Create the seven mode-0600 files listed in secrets/README.md.
+# Create the eight mode-0600 files listed in secrets/README.md.
 docker compose config --quiet
 docker compose build --pull
 docker compose up -d redis volume-init database-init ticker-seed
@@ -165,8 +165,10 @@ docker compose ps
 ```
 
 See
-[`ops/runbooks/production-readiness-batch-7.md`](ops/runbooks/production-readiness-batch-7.md)
-for the current data-trust and combined-budget release gates. The
+[`ops/runbooks/production-readiness-batch-8.md`](ops/runbooks/production-readiness-batch-8.md)
+for encrypted local backup, hourly RPO, and restore gates. The
+[`Batch 7 runbook`](ops/runbooks/production-readiness-batch-7.md) covers data
+trust and the combined budget, while the
 [`Batch 6 Compose runbook`](ops/runbooks/production-readiness-batch-6.md)
 contains first boot, health, durability, live delivery, upgrade, and rollback
 procedures. Local editable installs remain supported for development:
@@ -293,11 +295,13 @@ historical runs reproducible.
 - **Docker Compose** (`docker-compose.yml`): canonical production topology,
   dependency gates, health checks, local volumes, resource ceilings, and
   secret-file mounts.
-- **systemd units** (`ops/systemd/`): retained as legacy development/soak
-  artifacts; they are not the supported production supervisor.
+- **Application systemd units** (`ops/systemd/`): retained as legacy
+  development/soak artifacts; Compose remains the production supervisor. A
+  host systemd timer may invoke the Compose-aware backup wrapper.
 - **Runbooks** (`ops/runbooks/`): per-phase exit-gate procedures (pre-flight,
   run, evaluate).
-- **Backups** (`ops/backup.sh`): SQLite `.backup` + Redis AOF snapshot.
+- **Backups** (`ops/backup.sh`, `ops/restore.sh`): authenticated AES-256-GCM
+  local recovery points spanning both Compose volumes, with guarded restore.
 
 Bring up the sensing + orchestration + approval stack:
 

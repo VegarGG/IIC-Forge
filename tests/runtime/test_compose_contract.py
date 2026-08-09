@@ -79,7 +79,7 @@ def test_compose_requires_clean_init_and_seed_before_workers(compose):
 @pytest.mark.unit
 def test_compose_hardens_non_root_application_services(compose):
     for name, service in compose["services"].items():
-        if name in {"redis", "volume-init"}:
+        if name in {"redis", "volume-init", "backup-create", "backup-restore"}:
             continue
         assert service["user"] == "1000:1000"
         assert service["read_only"] is True
@@ -92,12 +92,35 @@ def test_compose_hardens_non_root_application_services(compose):
 @pytest.mark.unit
 def test_compose_mounts_secrets_as_files_not_environment_values(compose):
     common = compose["x-app-common"]
-    assert set(common["secrets"]) == set(compose["secrets"])
+    assert set(common["secrets"]) == set(compose["secrets"]) - {
+        "backup_encryption_key"
+    }
     environment = common["environment"]
     assert "DEEPSEEK_API_KEY" not in environment
     assert "POLYGON_API_KEY" not in environment
     assert "IIC_TELEGRAM_BOT_TOKEN" not in environment
     assert "IIC_SMTP_APP_PASSWORD" not in environment
+
+
+@pytest.mark.unit
+def test_compose_backup_tools_are_offline_profiled_and_least_privilege(compose):
+    create = compose["services"]["backup-create"]
+    restore = compose["services"]["backup-restore"]
+    for service in (create, restore):
+        assert service["profiles"] == ["operations"]
+        assert service["network_mode"] == "none"
+        assert service["read_only"] is True
+        assert service["restart"] == "no"
+        assert service["user"] == "0:0"
+        assert "ALL" in service["cap_drop"]
+        assert service["secrets"] == ["backup_encryption_key"]
+        assert "${IIC_BACKUP_DIR:-./backups}:/backups" in service["volumes"]
+    assert "iic-redis:/source/redis:ro" in create["volumes"]
+    assert "iic-data:/source/data:ro" in create["volumes"]
+    assert "iic-redis:/target/redis" in restore["volumes"]
+    assert "iic-data:/target/data" in restore["volumes"]
+    assert "CHOWN" not in create["cap_add"]
+    assert "CHOWN" in restore["cap_add"]
 
 
 @pytest.mark.unit

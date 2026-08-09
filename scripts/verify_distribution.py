@@ -11,6 +11,8 @@ from pathlib import Path
 
 REQUIRED_PACKAGE_FILES = {
     "cli/static/welcome.txt",
+    "tradingagents/backup/__init__.py",
+    "tradingagents/backup/archive.py",
     "tradingagents/delivery/templates/cli/deep_dive.j2",
     "tradingagents/delivery/templates/cli/event_alert.j2",
     "tradingagents/delivery/templates/cli/event_alert_light.j2",

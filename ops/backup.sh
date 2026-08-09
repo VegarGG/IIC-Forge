@@ -1,41 +1,56 @@
 #!/usr/bin/env bash
-# IIC daily backup — SQLite + Redis AOF.
-#
-# On this host Redis runs as the Docker container `iic-redis`
-# (host volume /srv/iic/redis -> /data in-container; Redis 7 uses a
-# multi-file AOF under appendonlydir/). There is no host redis-cli and no
-# /var/lib/redis, so the rewrite is issued *inside* the container and the
-# AOF is pulled from the docker volume.
-#
-# Cron entry (run as ziwei-huang, or as root — paths are absolute either way):
-#   0 3 * * *  /home/ziwei-huang/TradingAgents/TradingAgents/ops/backup.sh \
-#                >> /home/ziwei-huang/TradingAgents/TradingAgents/logs/backup.log 2>&1
+# Create one authenticated local recovery point for both Compose volumes.
+# Schedule every 50 minutes to leave operating margin inside the one-hour RPO.
 set -euo pipefail
 
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP_ROOT=${BACKUP_ROOT:-/var/backups/iic}
-# Pin the SQLite path; do NOT rely on $HOME (cron/root would resolve it wrong).
-SQLITE_DB=${IIC_DB_PATH:-/home/ziwei-huang/.tradingagents/iic.db}
-# Host-side mount of the container's /data volume.
-REDIS_VOLUME=${REDIS_VOLUME:-/srv/iic/redis}
-REDIS_CONTAINER=${REDIS_CONTAINER:-iic-redis}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+BACKUP_DIR="${IIC_BACKUP_DIR:-$PROJECT_ROOT/backups}"
 
-mkdir -p "$BACKUP_ROOT/sqlite" "$BACKUP_ROOT/redis"
+command -v docker >/dev/null 2>&1 || {
+  echo "fatal: docker is required" >&2
+  exit 69
+}
+command -v flock >/dev/null 2>&1 || {
+  echo "fatal: flock is required for overlapping-backup protection" >&2
+  exit 69
+}
 
-# SQLite: use the dedicated .backup pragma; safe under concurrent writers.
-sqlite3 "$SQLITE_DB" ".backup '$BACKUP_ROOT/sqlite/iic-$STAMP.db'"
+install -d -m 0700 "$BACKUP_DIR"
+BACKUP_DIR="$(cd "$BACKUP_DIR" && pwd -P)"
+export IIC_BACKUP_DIR="$BACKUP_DIR"
+cd "$PROJECT_ROOT"
 
-# Redis: ask the server (inside the container) to rewrite its AOF, then
-# snapshot the on-disk AOF state. Redis 7 keeps a multi-file appendonlydir/,
-# so copy the whole /data tree out of the container.
-docker exec "$REDIS_CONTAINER" redis-cli BGREWRITEAOF
-sleep 5
-REDIS_DEST="$BACKUP_ROOT/redis/redis-$STAMP"
-mkdir -p "$REDIS_DEST"
-docker cp "$REDIS_CONTAINER:/data/." "$REDIS_DEST/"
+exec 9>"$BACKUP_DIR/.operation.lock"
+if ! flock -n 9; then
+  echo "fatal: another backup or restore operation is already running" >&2
+  exit 75
+fi
 
-# Retain last 14 days.
-find "$BACKUP_ROOT/sqlite" -name 'iic-*.db' -mtime +14 -delete
-find "$BACKUP_ROOT/redis"  -maxdepth 1 -name 'redis-*' -mtime +14 -exec rm -rf {} +
+stack_stopped=0
+resume_stack() {
+  result=$?
+  trap - EXIT INT TERM
+  if [ "$stack_stopped" -eq 1 ]; then
+    if ! docker compose up -d; then
+      echo "fatal: backup finished unsuccessfully and the Compose stack did not restart" >&2
+      result=1
+    fi
+  fi
+  exit "$result"
+}
+trap resume_stack EXIT INT TERM
 
-echo "backup complete: $STAMP"
+docker compose config --quiet
+docker compose stop --timeout 60
+stack_stopped=1
+
+docker compose --profile operations run --rm --no-deps backup-create
+
+docker compose up -d
+stack_stopped=0
+
+docker compose --profile operations run --rm --no-deps backup-create \
+  forge backup status --output-root /backups --max-age-minutes 60
+
+echo "backup complete: encrypted SQLite/data and Redis recovery point verified"

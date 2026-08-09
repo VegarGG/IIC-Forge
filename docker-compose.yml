@@ -73,6 +73,26 @@ x-runtime-dependencies: &runtime-dependencies
   ticker-seed:
     condition: service_completed_successfully
 
+x-backup-common: &backup-common
+  image: ${IIC_IMAGE:-iic-forge:0.2.5}
+  build:
+    context: .
+    args:
+      APP_VERSION: "0.2.5"
+  profiles: [operations]
+  user: "0:0"
+  read_only: true
+  network_mode: none
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=${IIC_BACKUP_SCRATCH_SIZE:-4g}
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  secrets:
+    - backup_encryption_key
+  restart: "no"
+
 services:
   redis:
     image: ${IIC_REDIS_IMAGE:-redis:7.4.7-alpine3.21}
@@ -235,6 +255,47 @@ services:
     cpus: 0.75
     stop_grace_period: 30s
 
+  backup-create:
+    <<: *backup-common
+    command:
+      - forge
+      - backup
+      - create
+      - --data-root
+      - /source/data
+      - --redis-root
+      - /source/redis
+      - --output-root
+      - /backups
+      - --key-file
+      - /run/secrets/backup_encryption_key
+      - --keep-hourly-hours
+      - "48"
+      - --keep-daily-days
+      - "14"
+      - --keep-weekly-weeks
+      - "8"
+    cap_add:
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+    volumes:
+      - iic-data:/source/data:ro
+      - iic-redis:/source/redis:ro
+      - ${IIC_BACKUP_DIR:-./backups}:/backups
+
+  backup-restore:
+    <<: *backup-common
+    command: [forge, backup, --help]
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+      - FOWNER
+    volumes:
+      - iic-data:/target/data
+      - iic-redis:/target/redis
+      - ${IIC_BACKUP_DIR:-./backups}:/backups
+
 networks:
   backend:
     driver: bridge
@@ -260,3 +321,5 @@ secrets:
     file: ${IIC_SECRETS_DIR:-./secrets}/smtp_user
   smtp_app_password:
     file: ${IIC_SECRETS_DIR:-./secrets}/smtp_app_password
+  backup_encryption_key:
+    file: ${IIC_SECRETS_DIR:-./secrets}/backup_encryption_key

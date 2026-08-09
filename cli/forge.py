@@ -10,6 +10,7 @@ Wired into the main `tradingagents` CLI by ``cli/main.py``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -445,6 +446,104 @@ def runtime_run(service: str) -> None:
     from tradingagents.runtime import run_named_service
 
     run_named_service(service)
+
+
+# ---------------------------------------------------------------------
+# production backup sub-app (Batch 8)
+# ---------------------------------------------------------------------
+
+backup_app = typer.Typer(
+    name="backup", help="Encrypted local backup, verification, and restore controls"
+)
+app.add_typer(backup_app, name="backup")
+
+
+@backup_app.command("create")
+def backup_create(
+    data_root: Path = typer.Option(..., "--data-root"),
+    redis_root: Path = typer.Option(..., "--redis-root"),
+    output_root: Path = typer.Option(..., "--output-root"),
+    key_file: Path = typer.Option(..., "--key-file"),
+    label: str = typer.Option("scheduled", "--label"),
+    keep_hourly_hours: int = typer.Option(48, "--keep-hourly-hours"),
+    keep_daily_days: int = typer.Option(14, "--keep-daily-days"),
+    keep_weekly_weeks: int = typer.Option(8, "--keep-weekly-weeks"),
+    prune: bool = typer.Option(True, "--prune/--no-prune"),
+) -> None:
+    """Create and immediately verify one stopped-stack local snapshot."""
+    from tradingagents.backup import BackupError, create_backup
+
+    try:
+        result = create_backup(
+            data_root=data_root,
+            redis_root=redis_root,
+            output_root=output_root,
+            key_file=key_file,
+            label=label,
+            keep_hourly_hours=keep_hourly_hours,
+            keep_daily_days=keep_daily_days,
+            keep_weekly_weeks=keep_weekly_weeks,
+            apply_retention=prune,
+        )
+    except BackupError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print_json(json.dumps(result))
+
+
+@backup_app.command("verify")
+def backup_verify(
+    archive: Path,
+    key_file: Path = typer.Option(..., "--key-file"),
+) -> None:
+    """Authenticate the archive, every member hash, and the SQLite payload."""
+    from tradingagents.backup import BackupError, verify_backup
+
+    try:
+        result = verify_backup(archive, key_file=key_file)
+    except BackupError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print_json(json.dumps(result))
+
+
+@backup_app.command("status")
+def backup_show_status(
+    output_root: Path = typer.Option(..., "--output-root"),
+    max_age_minutes: int = typer.Option(60, "--max-age-minutes"),
+) -> None:
+    """Fail unless the latest verified encrypted snapshot is current."""
+    from tradingagents.backup import BackupError, backup_status
+
+    try:
+        result = backup_status(
+            output_root, max_age_minutes=max_age_minutes
+        )
+    except BackupError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print_json(json.dumps(result))
+
+
+@backup_app.command("restore")
+def backup_restore(
+    archive: Path,
+    data_root: Path = typer.Option(..., "--data-root"),
+    redis_root: Path = typer.Option(..., "--redis-root"),
+    key_file: Path = typer.Option(..., "--key-file"),
+    confirm: str = typer.Option(..., "--confirm"),
+) -> None:
+    """Restore a verified snapshot into stopped data and Redis volumes."""
+    from tradingagents.backup import BackupError, restore_backup
+
+    try:
+        result = restore_backup(
+            archive,
+            key_file=key_file,
+            data_root=data_root,
+            redis_root=redis_root,
+            confirm=confirm,
+        )
+    except BackupError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print_json(json.dumps(result))
 
 
 # ---------------------------------------------------------------------

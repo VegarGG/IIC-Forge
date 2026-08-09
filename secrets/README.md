@@ -11,7 +11,20 @@ newline:
 - `telegram_bot_token`
 - `smtp_user`
 - `smtp_app_password`
+- `backup_encryption_key` — base64 encoding of exactly 32 random bytes
 
 The files are mounted read-only at `/run/secrets`; the image entry point exports
 them only inside the application process. Every file except this README is
 ignored by Git. Never add real values to `.env.production` or the Compose file.
+
+Generate the backup key once on the production host without printing it:
+
+```bash
+umask 077
+openssl rand -base64 32 > secrets/backup_encryption_key
+chmod 0600 secrets/backup_encryption_key
+```
+
+The key is required for every verification and restore. Keep it on the local
+host but outside the data and Redis volumes. Off-host key escrow is outside the
+approved project scope.

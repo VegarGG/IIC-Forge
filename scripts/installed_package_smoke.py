@@ -10,6 +10,7 @@ from pathlib import Path
 
 import cli
 import tradingagents
+from tradingagents.backup import load_encryption_key
 from tradingagents.delivery.render import _plain_env as delivery_templates
 from tradingagents.persistence.db import connect, schema_tables
 from tradingagents.personas.resolver import load_packaged_persona
@@ -49,6 +50,13 @@ def main() -> None:
     delivery_templates.get_template("email/event_alert.j2")
 
     with tempfile.TemporaryDirectory(prefix="iic-forge-installed-smoke-") as tmp:
+        backup_key = Path(tmp) / "backup.key"
+        backup_key.write_text(
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=\n",
+            encoding="ascii",
+        )
+        if len(load_encryption_key(backup_key)) != 32:
+            raise RuntimeError("packaged backup encryption support failed")
         database_path = str(Path(tmp) / "iic.db")
         conn = connect(database_path)
         try:

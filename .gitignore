@@ -156,6 +156,7 @@ activemq-data/
 .envrc
 secrets/*
 !secrets/README.md
+backups/
 .venv
 env/
 venv/
