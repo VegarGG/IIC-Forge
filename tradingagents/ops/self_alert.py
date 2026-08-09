@@ -1,56 +1,21 @@
-"""Operator self-alert seam (Task 17) — "the local LLM endpoint is down".
+"""Availability-counter alerts with a durable production transport.
 
-The plan's FORGE_04 "Phase B alerting seam" never landed, so this module IS
-the minimal seam: a ``SelfAlerter`` with a pluggable ``transport`` callable.
-The daemons construct one via ``build_self_alerter(config)`` and hand its
-``endpoint_down_callback`` to their ``AvailabilityCounter`` as the
-``on_threshold`` hook; tests inject a recording transport instead.
+``SelfAlerter`` remains a small injectable seam so unit tests can provide a
+recording transport. ``build_self_alerter`` is the production constructor: it
+persists a deduplicated operational alert and queues Telegram/email delivery
+through the leased outbox. Direct Telegram sending remains only as a legacy
+compatibility helper and is not used by production construction.
 
-Design decisions (documented per the Task 17 spec):
-  - DEBOUNCE lives in the counter, not here: ``AvailabilityCounter`` invokes
-    ``on_threshold`` exactly once per outage (latched when ``consecutive``
-    crosses ``alert_threshold``, re-armed by ``record_success``), so this
-    module stays a dumb message pipe.  The callback fires OUTSIDE the
-    counter's (possibly shared) lock — see AvailabilityCounter.record_failure.
-  - THRESHOLD SOURCE: the daemons reuse the role's existing
-    ``fallback_threshold`` config key (llm_roles.<role>.fallback_threshold,
-    default 3) as the alert threshold — no new config plumbing.  Unlike the
-    fallback ENGAGEMENT (which only happens when fallback="api"), the alert
-    arms in every fallback mode: a dead endpoint with fallback="none" is
-    exactly when the operator must hear about it.
-  - TRANSPORT: Telegram via the EXISTING delivery keys — IIC_TELEGRAM_BOT_TOKEN
-    (env) + config["telegram_bot"]["enabled"/"allowed_chat_ids"], reusing
-    delivery.telegram's bot cache.  When any of those is missing at runtime
-    the alerter degrades to log-only (CRITICAL — journald still surfaces it),
-    never raises.  Plain text, no parse_mode: failure reasons contain
-    characters Markdown would choke on.
-  - NON-BLOCKING SEND: when ``_send`` is called from a running event-loop
-    thread (triage's process_one runs there), we must NOT block the loop.
-    ``_run_coro`` would do ``run_coroutine_threadsafe(...).result(timeout=30)``
-    — blocking the only thread that can drive the loop, guaranteeing a 30 s
-    freeze per outage.  Instead, ``_send`` detects a running loop and spawns a
-    short-lived daemon thread that calls ``asyncio.run(coro)`` with a freshly
-    constructed Bot (so it carries its own httpx client and loop, never
-    sharing the cached bot's resources across threads).  Fire-and-forget is
-    acceptable: the CRITICAL log already carries the message; transport
-    delivery is best-effort.
-  - The alert is best-effort once: a transport failure is logged (the
-    CRITICAL log line already carried the message) but NOT retried, and the
-    counter's latch stays set until recovery.
-  - CONTEXT FIELD: ``build_self_alerter`` / ``SelfAlerter`` / the callback
-    accept an optional ``context`` string (e.g. "role=alert_gate
-    provider=local model=qwen3:6b endpoint=http://192.168.1.50:8080/v1")
-    prepended to every notification so the operator knows which daemon and
-    endpoint died.
-  - FUTURE WORK: no periodic re-alert during a persistent outage (e.g. every
-    N hours); one alert per outage, re-armed on recovery, is the contract.
-    A recovery notice ("endpoint recovered") is also not sent; the operator
-    must observe log lines or the counter resetting to zero.
+The availability counter owns threshold/debounce behavior and calls this seam
+outside its lock. Context identifies the role/provider/model/endpoint. Every
+notification is logged at CRITICAL before persistence is attempted; a database
+failure is therefore loud but never crashes the monitored daemon.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import threading
@@ -177,10 +142,31 @@ def telegram_transport(config: Dict[str, Any]) -> Optional[Transport]:
 
 def build_self_alerter(config: Dict[str, Any], *,
                        context: str = "") -> SelfAlerter:
-    """The daemons' one-liner: Telegram transport if configured, else log-only.
+    """Build a durable self-alert routed through the normal delivery outbox.
 
-    ``context`` is a free-form string that identifies the daemon/role/endpoint
-    for the operator (e.g. "role=alert_gate provider=local
-    model=qwen3:6b endpoint=http://192.168.1.50:8080/v1").
+    The legacy ``telegram_transport`` remains available as an injectable seam
+    for older callers, but production construction never performs a direct
+    best-effort network send. A delivery outage therefore leaves queued work.
     """
-    return SelfAlerter(transport=telegram_transport(config), context=context)
+    stable_context = context.strip()
+    digest = hashlib.sha256(stable_context.encode("utf-8")).hexdigest()[:24]
+
+    def _record(message: str) -> None:
+        from tradingagents.ops.alerts import record_operational_alert
+        from tradingagents.persistence.db import connect
+
+        conn = connect(str(config["iic_db_path"]))
+        try:
+            record_operational_alert(
+                conn,
+                config=config,
+                dedup_key=f"llm-endpoint:{digest}",
+                category="llm_endpoint",
+                severity="critical",
+                summary=message,
+                details={"source": "availability_counter"},
+            )
+        finally:
+            conn.close()
+
+    return SelfAlerter(transport=_record, context=context)

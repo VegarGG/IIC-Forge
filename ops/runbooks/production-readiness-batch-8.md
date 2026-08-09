@@ -142,9 +142,13 @@ docker compose --profile operations run --rm --no-deps backup-create \
   forge backup status --output-root /backups --max-age-minutes 60
 ```
 
-Require the directory to be mode `0700`, files to be mode `0600`, status
-`current`, and backup age at most 60 minutes. Never run `strings`, `tar`, or
-other plaintext inspection against the encrypted file.
+With Batch 9 or later, require the directory to be mode `0750` and recognized
+encrypted archive/marker/checksum files to be mode `0640`: the host operator
+remains owner and only the application data group gains read/traverse access
+so the non-root monitor can report backup age. On a pre-Batch-9 image the
+original `0700`/`0600` contract applies. In both cases require status `current`
+and backup age at most 60 minutes. Never run `strings`, `tar`, or other
+plaintext inspection against the encrypted file.
 
 Perform an explicit full authentication check at least weekly:
 

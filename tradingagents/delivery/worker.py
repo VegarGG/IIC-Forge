@@ -131,6 +131,7 @@ def drain_one(
             job["max_attempts"],
             state,
             detail,
+            extra={"correlation_id": f"delivery-job:{job['delivery_job_id']}"},
         )
     except queue_store.DeliveryLeaseLost:
         raise
@@ -147,7 +148,12 @@ def drain_one(
             error_category="worker_runtime",
             now=current,
         )
-        log.exception("delivery job %d failed; state=%s", job["delivery_job_id"], state)
+        log.exception(
+            "delivery job %d failed; state=%s",
+            job["delivery_job_id"],
+            state,
+            extra={"correlation_id": f"delivery-job:{job['delivery_job_id']}"},
+        )
     return True
 
 

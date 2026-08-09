@@ -145,27 +145,33 @@ app.add_typer(orch_app, name="orchestrator")
 @orch_app.command("promoter")
 def orchestrator_promoter() -> None:
     """Run the promoter loop in the foreground (systemd wraps this)."""
-    import logging
     from tradingagents.orchestrator.promoter import main
+    from tradingagents.ops.heartbeat import ServiceHeartbeat
+    from tradingagents.ops.logging import configure_logging
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    main()
+    configure_logging("promoter")
+    with ServiceHeartbeat(
+        DEFAULT_CONFIG["iic_db_path"],
+        "promoter",
+        interval_seconds=DEFAULT_CONFIG["operator_heartbeat_interval_seconds"],
+    ):
+        main()
 
 
 @orch_app.command("worker")
 def orchestrator_worker() -> None:
     """Run the worker loop in the foreground (systemd wraps this)."""
-    import logging
     from tradingagents.orchestrator.worker import main
+    from tradingagents.ops.heartbeat import ServiceHeartbeat
+    from tradingagents.ops.logging import configure_logging
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    main()
+    configure_logging("analysis-worker")
+    with ServiceHeartbeat(
+        DEFAULT_CONFIG["iic_db_path"],
+        "analysis-worker",
+        interval_seconds=DEFAULT_CONFIG["operator_heartbeat_interval_seconds"],
+    ):
+        main()
 
 
 @orch_app.command("status")
@@ -177,6 +183,7 @@ def orchestrator_status() -> None:
         beijing_budget_date,
         daily_budget_total,
     )
+    from tradingagents.ops.logging import redact
 
     conn = _conn()
     pending = queue_store.pending_count(conn)
@@ -226,7 +233,7 @@ def orchestrator_status() -> None:
             (r["finished_ts"] or "")[:19],
             (r["brief_id"] or "")[:8],
             f"{(r['cost_usd'] or 0.0):.4f}",
-            (r["operator_note"] or r["error"] or "")[:40],
+            redact(r["operator_note"] or r["error"] or "")[:40],
         )
     console.print(t)
 
@@ -250,6 +257,59 @@ def orchestrator_retry(
     console.print(f"[green]requeued[/green] analysis job {job_id}")
 
 
+@orch_app.command("inspect")
+def orchestrator_inspect(job_id: int) -> None:
+    """Show one analysis job without exposing its untrusted payload."""
+    from tradingagents.orchestrator import queue_store
+
+    job = queue_store.inspect_job(_conn(), job_id=job_id)
+    if job is None:
+        raise typer.BadParameter(f"analysis job {job_id} does not exist")
+    console.print_json(data=job)
+
+
+@orch_app.command("cancel")
+def orchestrator_cancel(
+    job_id: int,
+    note: str = typer.Option(..., "--note", help="Why inactive work is cancelled."),
+) -> None:
+    """Cancel queued, blocked, or exhausted analysis work; never kill a runner."""
+    from tradingagents.orchestrator import queue_store
+
+    if not note.strip():
+        raise typer.BadParameter("--note must not be empty")
+    if not queue_store.cancel_job(_conn(), job_id=job_id, operator_note=note):
+        raise typer.BadParameter(
+            f"analysis job {job_id} is not queued, blocked, or error"
+        )
+    console.print(f"[yellow]cancelled[/yellow] analysis job {job_id}")
+
+
+@orch_app.command("drain")
+def orchestrator_drain(
+    timeout_seconds: int = typer.Option(300, "--timeout-seconds", min=1),
+    poll_seconds: float = typer.Option(2.0, "--poll-seconds", min=0.1),
+) -> None:
+    """Wait until active analysis work is empty after producers are stopped."""
+    import time
+    from tradingagents.orchestrator import queue_store
+
+    deadline = time.monotonic() + timeout_seconds
+    conn = _conn()
+    try:
+        while True:
+            pending = queue_store.pending_count(conn)
+            if pending == 0:
+                console.print_json(data={"status": "drained", "pending": 0})
+                return
+            if time.monotonic() >= deadline:
+                console.print_json(data={"status": "timeout", "pending": pending})
+                raise typer.Exit(code=1)
+            time.sleep(poll_seconds)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------
 # delivery queue sub-app (production Batch 3)
 # ---------------------------------------------------------------------
@@ -261,19 +321,24 @@ app.add_typer(delivery_app, name="delivery")
 @delivery_app.command("worker")
 def delivery_worker() -> None:
     """Run the persistent Telegram/email delivery worker in the foreground."""
-    import logging
     from tradingagents.delivery.worker import main
+    from tradingagents.ops.heartbeat import ServiceHeartbeat
+    from tradingagents.ops.logging import configure_logging
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    main()
+    configure_logging("delivery-worker")
+    with ServiceHeartbeat(
+        DEFAULT_CONFIG["iic_db_path"],
+        "delivery-worker",
+        interval_seconds=DEFAULT_CONFIG["operator_heartbeat_interval_seconds"],
+    ):
+        main()
 
 
 @delivery_app.command("status")
 def delivery_status() -> None:
     """Show outbox state counts and the ten most recent delivery intents."""
+    from tradingagents.ops.logging import redact
+
     conn = _conn()
     counts = list(
         conn.execute(
@@ -317,7 +382,7 @@ def delivery_status() -> None:
             f"{row['attempt_count']}/{row['max_attempts']}",
             (row["available_ts"] or "")[:19],
             (row["error_category"] or "")[:28],
-            (row["last_error"] or "")[:40],
+            redact(row["last_error"] or "")[:40],
         )
     console.print(table)
 
@@ -444,8 +509,237 @@ def runtime_health(
 def runtime_run(service: str) -> None:
     """Run one supported Compose service in the foreground."""
     from tradingagents.runtime import run_named_service
+    from tradingagents.ops.heartbeat import ServiceHeartbeat
+    from tradingagents.ops.logging import configure_logging
 
-    run_named_service(service)
+    configure_logging(service)
+    with ServiceHeartbeat(
+        DEFAULT_CONFIG["iic_db_path"],
+        service,
+        interval_seconds=DEFAULT_CONFIG["operator_heartbeat_interval_seconds"],
+    ):
+        run_named_service(service)
+
+
+# ---------------------------------------------------------------------
+# Batch 9 operator observability and administrative controls
+# ---------------------------------------------------------------------
+
+operator_app = typer.Typer(
+    name="operator", help="Private production status, preflight, and recovery controls"
+)
+app.add_typer(operator_app, name="operator")
+
+
+def _backup_root() -> Path:
+    import os
+
+    return Path(os.environ.get("IIC_BACKUP_DIR", "./backups")).expanduser().resolve()
+
+
+def _operator_config() -> dict:
+    """Refresh path overrides for repeated in-process CLI invocations/tests."""
+    import os
+
+    config = dict(DEFAULT_CONFIG)
+    config["iic_db_path"] = os.environ.get(
+        "TRADINGAGENTS_IIC_DB_PATH", config["iic_db_path"]
+    )
+    config["iic_data_dir"] = os.environ.get(
+        "TRADINGAGENTS_IIC_DATA_DIR", config["iic_data_dir"]
+    )
+    config["sensing_redis_url"] = os.environ.get(
+        "TRADINGAGENTS_SENSING_REDIS_URL", config["sensing_redis_url"]
+    )
+    return config
+
+
+@operator_app.command("status")
+def operator_status(
+    full_database_check: bool = typer.Option(False, "--full-database-check"),
+    redis: bool = typer.Option(True, "--redis/--no-redis"),
+) -> None:
+    """Emit a bounded JSON snapshot; queue payloads and secrets are excluded."""
+    from tradingagents.ops.status import collect_status
+
+    config = _operator_config()
+    conn = _conn()
+    try:
+        result = collect_status(
+            conn,
+            config,
+            backup_root=_backup_root(),
+            full_database_check=full_database_check,
+            redis_check=redis,
+        )
+    finally:
+        conn.close()
+    console.print_json(data=result)
+
+
+@operator_app.command("preflight")
+def operator_preflight(
+    require_production_config: bool = typer.Option(
+        False, "--require-production-config"
+    ),
+    require_all_services: bool = typer.Option(
+        False, "--require-all-services/--allow-missing-services"
+    ),
+) -> None:
+    """Run full integrity, dependency, capacity, and production-contract checks."""
+    from tradingagents.ops.status import collect_status, health_issues
+    from tradingagents.runtime import validate_production_environment
+
+    config = _operator_config()
+    config_errors = (
+        validate_production_environment(config)
+        if require_production_config
+        else []
+    )
+    conn = _conn()
+    try:
+        snapshot = collect_status(
+            conn,
+            config,
+            backup_root=_backup_root(),
+            full_database_check=True,
+            redis_check=True,
+        )
+    finally:
+        conn.close()
+    issues = health_issues(snapshot, require_all_services=require_all_services)
+    result = {
+        "status": "ok" if not config_errors and not issues else "failed",
+        "configuration_errors": config_errors,
+        "health_issues": issues,
+        "snapshot": snapshot,
+    }
+    console.print_json(data=result)
+    if result["status"] != "ok":
+        raise typer.Exit(code=1)
+
+
+@operator_app.command("monitor")
+def operator_monitor() -> None:
+    """Run the durable alerting monitor in the foreground."""
+    from tradingagents.ops.heartbeat import ServiceHeartbeat
+    from tradingagents.ops.logging import configure_logging
+    from tradingagents.ops.monitor import main
+
+    configure_logging("operator-monitor")
+    with ServiceHeartbeat(
+        DEFAULT_CONFIG["iic_db_path"],
+        "operator-monitor",
+        interval_seconds=DEFAULT_CONFIG["operator_heartbeat_interval_seconds"],
+    ):
+        main()
+
+
+@operator_app.command("alerts")
+def operator_alerts(open_only: bool = typer.Option(True, "--open/--all")) -> None:
+    """List durable operational alert metadata and occurrence counts."""
+    conn = _conn()
+    where = "WHERE state='open'" if open_only else ""
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT alert_id, dedup_key, category, severity, summary, state, "
+            "first_seen_ts, last_seen_ts, occurrence_count, last_delivery_ts, "
+            "resolved_ts, operator_note FROM operational_alerts "
+            f"{where} ORDER BY last_seen_ts DESC LIMIT 200"
+        )
+    ]
+    conn.close()
+    console.print_json(data={"alerts": rows})
+
+
+@operator_app.command("release-budget")
+def operator_release_budget(
+    call_id: str,
+    note: str = typer.Option(..., "--note"),
+    evidence: str = typer.Option(..., "--evidence"),
+    confirm: str = typer.Option(..., "--confirm"),
+    minimum_age_hours: int = typer.Option(1, "--minimum-age-hours", min=1),
+) -> None:
+    """Release only an old abandoned reservation; preserve the ledger row."""
+    from tradingagents.llm_clients.daily_budget import release_stale_reservation
+
+    conn = _conn()
+    try:
+        released = release_stale_reservation(
+            conn,
+            call_id=call_id,
+            operator_note=note,
+            evidence=evidence,
+            confirm=confirm,
+            minimum_age_hours=minimum_age_hours,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        conn.close()
+    console.print_json(data={"call_id": call_id, "released_usd": released})
+
+
+@operator_app.command("retention")
+def operator_retention(
+    apply: bool = typer.Option(False, "--apply/--preview"),
+    note: str = typer.Option("", "--note"),
+    confirm: str = typer.Option("", "--confirm"),
+) -> None:
+    """Preview bounded retention; apply only with note and exact confirmation."""
+    from tradingagents.ops.retention import apply_retention, retention_candidates
+
+    conn = _conn()
+    config = _operator_config()
+    try:
+        candidates = retention_candidates(
+            conn, data_dir=config["iic_data_dir"]
+        )
+        if not apply:
+            console.print_json(data={"status": "preview", **candidates})
+            return
+        try:
+            result = apply_retention(
+                conn,
+                candidates=candidates,
+                operator_note=note,
+                confirm=confirm,
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        console.print_json(data={"status": "applied", **result})
+    finally:
+        conn.close()
+
+
+@operator_app.command("restore-drill")
+def operator_restore_drill(
+    archive: Path,
+    key_file: Path = typer.Option(..., "--key-file"),
+    note: str = typer.Option(..., "--note"),
+    confirm: str = typer.Option(..., "--confirm"),
+) -> None:
+    """Actually restore into disposable roots and persist the drill result."""
+    from tradingagents.backup import BackupError
+    from tradingagents.ops.recovery import run_restore_drill
+
+    conn = _conn()
+    try:
+        result = run_restore_drill(
+            conn,
+            archive=archive,
+            key_file=key_file,
+            operator_note=note,
+            confirm=confirm,
+        )
+    except (BackupError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        conn.close()
+    console.print_json(data=result)
+    if result["status"] != "passed":
+        raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------

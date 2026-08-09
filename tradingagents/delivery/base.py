@@ -31,7 +31,9 @@ class DeliveryError(Exception):
         self.category = category
 
 
-_QUEUED_MODES = {"event_alert", "event_alert_light", "morning_digest"}
+_QUEUED_MODES = {
+    "event_alert", "event_alert_light", "morning_digest", "operational_alert"
+}
 
 
 def _utc_now_iso() -> str:

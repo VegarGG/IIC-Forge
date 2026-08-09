@@ -69,7 +69,9 @@ def enqueue_alert(
     commit: bool = True,
 ) -> int:
     """Persist one outbound/channel intent, returning the stable queue row id."""
-    if mode not in {"event_alert", "event_alert_light", "morning_digest"}:
+    if mode not in {
+        "event_alert", "event_alert_light", "morning_digest", "operational_alert"
+    }:
         raise ValueError(f"delivery outbox does not accept mode {mode!r}")
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
@@ -492,8 +494,14 @@ def cancel_delivery(
 def inspect_delivery(
     conn: sqlite3.Connection, *, delivery_job_id: int
 ) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
+    from tradingagents.ops.logging import redact
+
     row = conn.execute(
-        "SELECT * FROM delivery_queue WHERE delivery_job_id = ?",
+        "SELECT delivery_job_id, idempotency_key, brief_id, channel, mode, state, "
+        "attempt_count, max_attempts, available_ts, lease_expires_ts, last_error, "
+        "last_error_ts, error_category, blocked_ts, cancelled_ts, operator_note, "
+        "last_delivery_id, created_ts, updated_ts FROM delivery_queue "
+        "WHERE delivery_job_id = ?",
         (delivery_job_id,),
     ).fetchone()
     if row is None:
@@ -503,4 +511,14 @@ def inspect_delivery(
         "ORDER BY event_id",
         (delivery_job_id,),
     ).fetchall()
-    return dict(row), [dict(event) for event in events]
+    job = dict(row)
+    for key in ("last_error", "operator_note"):
+        if job.get(key):
+            job[key] = redact(job[key])
+    safe_events = []
+    for event in events:
+        value = dict(event)
+        if value.get("note"):
+            value["note"] = redact(value["note"])
+        safe_events.append(value)
+    return job, safe_events

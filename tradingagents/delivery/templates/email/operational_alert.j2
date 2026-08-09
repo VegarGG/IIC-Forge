@@ -1,0 +1,10 @@
+<h2>IIC-FORGE {{ severity | upper }}</h2>
+<p>{{ summary }}</p>
+<dl>
+  <dt>Category</dt><dd>{{ scope }}</dd>
+  <dt>Alert ID</dt><dd>{{ alert_id }}</dd>
+  <dt>Observed</dt><dd>{{ generated_ts }}</dd>
+{% for key, value in details.items() %}
+  <dt>{{ key }}</dt><dd>{{ value }}</dd>
+{% endfor %}
+</dl>

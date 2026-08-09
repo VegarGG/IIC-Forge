@@ -260,6 +260,68 @@ def mark_error(
         raise QueueLeaseLost(f"queue job {job_id} is not mutable")
 
 
+def inspect_job(
+    conn: sqlite3.Connection, *, job_id: int
+) -> Optional[dict[str, object]]:
+    """Return operational metadata only; deliberately omit the job payload."""
+    row = conn.execute(
+        "SELECT job_id, job_type, state, enqueued_ts, started_ts, finished_ts, "
+        "trigger_event_id, run_ids, brief_id, cost_usd, error, idempotency_key, "
+        "attempt_count, max_attempts, available_ts, lease_expires_ts, last_error_ts, "
+        "error_category, blocked_ts, operator_note, worker_pid, last_exit_code "
+        "FROM queue_jobs WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    from tradingagents.ops.logging import redact
+
+    result = dict(row)
+    for key in ("error", "operator_note"):
+        if result.get(key):
+            result[key] = redact(result[key])
+    return result
+
+
+def cancel_job(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    operator_note: str,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Cancel inactive work; a running or completed process is never interrupted."""
+    if not operator_note.strip():
+        raise ValueError("operator_note must not be empty")
+    cancelled = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    with conn:
+        row = conn.execute(
+            "SELECT state FROM queue_jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if row is None or row["state"] not in {"queued", "blocked", "error"}:
+            return False
+        previous = str(row["state"])
+        changed = conn.execute(
+            "UPDATE queue_jobs SET state='cancelled', finished_ts=?, operator_note=?, "
+            "worker_pid=NULL, lease_token=NULL, lease_expires_ts=NULL "
+            "WHERE job_id=? AND state=?",
+            (cancelled, operator_note[:2000], job_id, previous),
+        ).rowcount
+        if changed:
+            conn.execute(
+                "INSERT INTO operator_actions (action_type, target_type, target_id, "
+                "requested_ts, operator_note, result, metadata) VALUES "
+                "('cancel', 'analysis_job', ?, ?, ?, 'cancelled', ?)",
+                (
+                    str(job_id),
+                    cancelled,
+                    operator_note[:2000],
+                    json.dumps({"from_state": previous}, sort_keys=True),
+                ),
+            )
+    return changed == 1
+
+
 def pending_count(conn: sqlite3.Connection) -> int:
     """Jobs currently queued OR running (anything not yet terminal)."""
     return conn.execute(
@@ -336,15 +398,34 @@ def retry_error_job(
     if not operator_note.strip():
         raise ValueError("operator_note must not be empty")
     available = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    changed = conn.execute(
-        "UPDATE queue_jobs SET state = 'queued', available_ts = ?, "
-        "finished_ts = NULL, max_attempts = attempt_count + ?, "
-        "operator_note = ?, blocked_ts = NULL, worker_pid = NULL, "
-        "lease_token = NULL, lease_expires_ts = NULL "
-        "WHERE job_id = ? AND state IN ('error', 'blocked')",
-        (available.isoformat(), additional_attempts, operator_note[:1000], job_id),
-    ).rowcount
-    conn.commit()
+    with conn:
+        prior = conn.execute(
+            "SELECT state FROM queue_jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        changed = conn.execute(
+            "UPDATE queue_jobs SET state = 'queued', available_ts = ?, "
+            "finished_ts = NULL, max_attempts = attempt_count + ?, "
+            "operator_note = ?, blocked_ts = NULL, worker_pid = NULL, "
+            "lease_token = NULL, lease_expires_ts = NULL "
+            "WHERE job_id = ? AND state IN ('error', 'blocked')",
+            (available.isoformat(), additional_attempts, operator_note[:1000], job_id),
+        ).rowcount
+        if changed:
+            conn.execute(
+                "INSERT INTO operator_actions (action_type, target_type, target_id, "
+                "requested_ts, operator_note, result, metadata) VALUES "
+                "('retry', 'analysis_job', ?, ?, ?, 'requeued', ?)",
+                (
+                    str(job_id),
+                    available.isoformat(),
+                    operator_note[:2000],
+                    json.dumps(
+                        {"from_state": prior["state"] if prior else None,
+                         "additional_attempts": additional_attempts},
+                        sort_keys=True,
+                    ),
+                ),
+            )
     return changed == 1
 
 

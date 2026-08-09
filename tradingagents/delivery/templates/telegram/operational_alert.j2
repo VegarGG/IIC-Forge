@@ -1,0 +1,7 @@
+[IIC-FORGE {{ severity | upper }}] {{ summary }}
+
+Category: {{ scope }}
+Alert ID: {{ alert_id }}
+Observed: {{ generated_ts }}
+{% for key, value in details.items() %}{{ key }}: {{ value }}
+{% endfor %}

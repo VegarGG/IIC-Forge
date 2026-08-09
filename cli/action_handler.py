@@ -63,4 +63,14 @@ def action_handler_run() -> None:
 
 @action_handler_app.command("run")
 def cmd_run() -> None:
-    action_handler_run()
+    from tradingagents.ops.heartbeat import ServiceHeartbeat
+    from tradingagents.ops.logging import configure_logging
+
+    config = _dc.DEFAULT_CONFIG
+    configure_logging("action-handler")
+    with ServiceHeartbeat(
+        config["iic_db_path"],
+        "action-handler",
+        interval_seconds=config["operator_heartbeat_interval_seconds"],
+    ):
+        action_handler_run()

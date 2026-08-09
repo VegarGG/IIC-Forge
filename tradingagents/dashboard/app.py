@@ -5,16 +5,34 @@ Run via: streamlit run tradingagents/dashboard/app.py
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
 
 import streamlit as st
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.persistence.db import connect as iic_connect
 from tradingagents.dashboard.panels.briefs import fetch_recent_briefs, fetch_brief_thread
+from tradingagents.dashboard.auth import require_authentication, safe_content_path
+from tradingagents.ops.logging import configure_logging
 
 
+configure_logging("dashboard")
 st.set_page_config(page_title="IIC-FORGE Dashboard", layout="wide")
+
+
+@st.cache_resource
+def _dashboard_heartbeat():
+    from tradingagents.ops.heartbeat import ServiceHeartbeat
+
+    return ServiceHeartbeat(
+        DEFAULT_CONFIG["iic_db_path"],
+        "dashboard",
+        interval_seconds=DEFAULT_CONFIG["operator_heartbeat_interval_seconds"],
+    ).start()
+
+
+_dashboard_heartbeat()
+require_authentication()
 
 
 @st.cache_resource
@@ -24,9 +42,38 @@ def _conn():
 
 st.title("IIC-FORGE")
 
-tab_briefs, tab_costs, tab_queue, tab_actions = st.tabs(
-    ["Briefs", "Costs", "Queue", "Actions"]
+tab_system, tab_briefs, tab_costs, tab_queue, tab_actions = st.tabs(
+    ["System", "Briefs", "Costs", "Queue", "Actions"]
 )
+
+with tab_system:
+    from tradingagents.dashboard.panels.system import (
+        fetch_open_alerts,
+        fetch_system_status,
+    )
+
+    st.header("Production status")
+    snapshot = fetch_system_status(
+        _conn(),
+        DEFAULT_CONFIG,
+        backup_root=os.environ.get("IIC_BACKUP_DIR", "/backups"),
+    )
+    metrics = st.columns(4)
+    analysis = snapshot["queues"]["analysis"]["counts"]
+    delivery = snapshot["queues"]["delivery"]["counts"]
+    metrics[0].metric("Analysis pending", analysis.get("queued", 0) + analysis.get("running", 0))
+    metrics[1].metric("Delivery pending", delivery.get("queued", 0) + delivery.get("running", 0))
+    metrics[2].metric("LLM budget used", f"{snapshot['budget']['utilization_percent']:.1f}%")
+    metrics[3].metric("Backup", snapshot["backup"]["status"])
+    st.subheader("Service heartbeats")
+    st.dataframe(
+        [{"service": name, **value} for name, value in snapshot["heartbeats"].items()],
+        use_container_width=True,
+    )
+    st.subheader("Open operational alerts")
+    st.dataframe(fetch_open_alerts(_conn()) or [{"info": "none"}], use_container_width=True)
+    with st.expander("Machine-readable status"):
+        st.json(snapshot)
 
 with tab_briefs:
     st.header("Recent briefs")
@@ -43,9 +90,13 @@ with tab_briefs:
             thread = fetch_brief_thread(_conn(), brief_id=selected)
             for b in thread:
                 st.subheader(f"{b['brief_id']} (depth={b['refine_depth']})")
-                body_path = Path(DEFAULT_CONFIG["iic_data_dir"]) / b["content_path"]
-                if body_path.exists():
-                    st.markdown(body_path.read_text())
+                body_path = safe_content_path(
+                    DEFAULT_CONFIG["iic_data_dir"], b["content_path"]
+                )
+                if body_path is not None:
+                    st.markdown(body_path.read_text(encoding="utf-8")[:2_000_000])
+                else:
+                    st.warning("Brief artifact is missing or outside the data directory.")
 
 with tab_costs:
     st.header("Daily cost trend")

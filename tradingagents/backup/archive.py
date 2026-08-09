@@ -735,6 +735,35 @@ def create_backup(
             if apply_retention
             else []
         )
+        # The Compose backup tool intentionally runs as root so it can read
+        # both private volumes. Grant the application data group (gid 1000 in
+        # the canonical stack) read/traverse access to recognized encrypted
+        # outputs; otherwise the non-root Batch 9 monitor cannot validate
+        # backup age. Preserve the host backup-directory owner and never touch
+        # unrecognized files. The encryption key is not in this group.
+        if os.geteuid() == 0:
+            source_owner = data.stat()
+            output_owner = output.stat()
+            for private_file in (
+                destination,
+                _checksum_sidecar(destination),
+                output / "latest.json",
+            ):
+                os.chown(
+                    private_file,
+                    output_owner.st_uid,
+                    source_owner.st_gid,
+                    follow_symlinks=False,
+                )
+                os.chmod(private_file, 0o640, follow_symlinks=False)
+            os.chown(
+                output,
+                output_owner.st_uid,
+                source_owner.st_gid,
+                follow_symlinks=False,
+            )
+            os.chmod(output, 0o750, follow_symlinks=False)
+            _fsync_directory(output)
     except Exception:
         temporary.unlink(missing_ok=True)
         if not published:

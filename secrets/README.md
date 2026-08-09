@@ -12,6 +12,8 @@ newline:
 - `smtp_user`
 - `smtp_app_password`
 - `backup_encryption_key` — base64 encoding of exactly 32 random bytes
+- `operator_dashboard_password` — at least 20 random characters; used only by
+  the loopback-bound operator dashboard
 
 The files are mounted read-only at `/run/secrets`; the image entry point exports
 them only inside the application process. Every file except this README is
@@ -22,7 +24,9 @@ Generate the backup key once on the production host without printing it:
 ```bash
 umask 077
 openssl rand -base64 32 > secrets/backup_encryption_key
+openssl rand -base64 32 > secrets/operator_dashboard_password
 chmod 0600 secrets/backup_encryption_key
+chmod 0600 secrets/operator_dashboard_password
 ```
 
 The key is required for every verification and restore. Keep it on the local

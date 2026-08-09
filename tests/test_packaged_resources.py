@@ -14,6 +14,7 @@ def test_packaged_text_and_yaml_resources_are_readable():
         "analysis_worker_process",
         "delivery_outbox_controls",
         "quality_security_budget",
+        "operator_observability",
     ]
     assert "CREATE TABLE" in migrations[0].sql
     persona = load_packaged_persona("balanced")

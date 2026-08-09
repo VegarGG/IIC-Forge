@@ -203,6 +203,14 @@ DEFAULT_CONFIG = _apply_nested_env_overrides(_apply_env_overrides({
     # DeepSeek V4-Pro's conservative full-context + max-output upper bound is
     # below $1 at the official 2026-08-09 price schedule.
     "daily_budget_reservation_usd": 1.0,
+    # Batch 9 operator monitor. Heartbeats are written every 15 seconds;
+    # six missed intervals are considered stale. The startup grace prevents
+    # false missing-service alerts while Compose finishes parallel startup.
+    "operator_heartbeat_interval_seconds": 15,
+    "operator_heartbeat_stale_seconds": 90,
+    "operator_monitor_interval_seconds": 30,
+    "operator_monitor_initial_grace_seconds": 120,
+    "operator_backup_max_age_minutes": 120,
     # Optional cap on the number of resolved memory log entries. When set,
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.

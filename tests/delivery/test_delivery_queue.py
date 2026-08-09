@@ -239,6 +239,7 @@ def test_operator_requeue_and_cancel_are_audited(conn):
     )
     job, events = queue_store.inspect_delivery(conn, delivery_job_id=job_id)
     assert job is not None and job["state"] == "cancelled"
+    assert "brief_payload" not in job and "body" not in job
     assert job["operator_note"] == "synthetic alert no longer needed"
     assert [event["event_type"] for event in events] == [
         "enqueued",

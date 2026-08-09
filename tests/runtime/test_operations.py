@@ -163,7 +163,7 @@ def test_initialize_runtime_bootstraps_private_verified_database(tmp_path):
     database = Path(result["database"])
     assert result["integrity"] == "ok"
     assert result["foreign_key_violations"] == 0
-    assert result["migrations"][-1]["version"] == 5
+    assert result["migrations"][-1]["version"] == 6
     assert database.stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "data" / "events" / "staging").stat().st_mode & 0o777 == 0o700
     assert (tmp_path / "data" / "events" / "quarantine").stat().st_mode & 0o777 == 0o700

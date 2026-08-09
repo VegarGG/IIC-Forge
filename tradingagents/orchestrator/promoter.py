@@ -88,6 +88,7 @@ def run_once(
                         "light alert rejected event_id=%s tickers=%s "
                         "disqualifiers=%s",
                         g["event_id"], fresh, evaluation.disqualifiers,
+                        extra={"correlation_id": f"event:{g['event_id']}"},
                     )
                     continue
             try:
@@ -97,8 +98,12 @@ def run_once(
                 )
                 seen_tickers.update(fresh)
                 composed += 1
-                log.info("light alert composed event_id=%s tickers=%s",
-                         g["event_id"], fresh)
+                log.info(
+                    "light alert composed event_id=%s tickers=%s",
+                    g["event_id"],
+                    fresh,
+                    extra={"correlation_id": f"event:{g['event_id']}"},
+                )
             except Exception:
                 # Operator note: transport failures inside compose are
                 # swallowed HERE (per-event, the pass continues) and are NOT
@@ -107,8 +112,11 @@ def run_once(
                 # handler.  A partial outage that breaks compose but not the
                 # gate is therefore visible in this log line, not in
                 # promoter_llm_failures.  Deliberate scope (D5).
-                log.exception("light alert failed event_id=%s; continuing",
-                              g["event_id"])
+                log.exception(
+                    "light alert failed event_id=%s; continuing",
+                    g["event_id"],
+                    extra={"correlation_id": f"event:{g['event_id']}"},
+                )
         return composed
 
     # ----- Legacy auto-enqueue path (approval gate disabled) -----
@@ -148,11 +156,18 @@ def run_once(
                     commit=False,
                 )
             enqueued += 1
-            log.info("enqueued event_alert event_id=%s ticker=%s",
-                     ev["event_id"], ev["ticker"])
+            log.info(
+                "enqueued event_alert event_id=%s ticker=%s",
+                ev["event_id"],
+                ev["ticker"],
+                extra={"correlation_id": f"event:{ev['event_id']}"},
+            )
         except sqlite3.OperationalError:
-            log.exception("db error enqueueing event_id=%s; backing off",
-                          ev["event_id"])
+            log.exception(
+                "db error enqueueing event_id=%s; backing off",
+                ev["event_id"],
+                extra={"correlation_id": f"event:{ev['event_id']}"},
+            )
             time.sleep(2)
     return enqueued
 

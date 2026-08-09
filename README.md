@@ -148,13 +148,14 @@ measurable exit gate (`scripts/f*_exit_gate.py`) whose report lands in
 Docker Compose is the canonical production runtime. It starts only the
 approved RSS, Telegram, and Polygon ingestion connectors, plus Redis, triage,
 promotion, the Beijing-time scheduler, one analysis worker, durable delivery,
-Telegram callbacks, and the action handler.
+Telegram callbacks, the action handler, a durable operator monitor, and an
+authenticated loopback-only dashboard.
 
 ```bash
 cp .env.production.example .env.production
 chmod 0600 .env.production
 install -d -m 0700 secrets
-# Create the eight mode-0600 files listed in secrets/README.md.
+# Create the nine mode-0600 files listed in secrets/README.md.
 docker compose config --quiet
 docker compose build --pull
 docker compose up -d redis volume-init database-init ticker-seed
@@ -165,6 +166,9 @@ docker compose ps
 ```
 
 See
+[`ops/runbooks/production-readiness-batch-9.md`](ops/runbooks/production-readiness-batch-9.md)
+for operator status, preflight, durable operational alerts, recovery controls,
+retention, and dashboard field gates. The
 [`ops/runbooks/production-readiness-batch-8.md`](ops/runbooks/production-readiness-batch-8.md)
 for encrypted local backup, hourly RPO, and restore gates. The
 [`Batch 7 runbook`](ops/runbooks/production-readiness-batch-7.md) covers data
@@ -196,6 +200,8 @@ tradingagents forge sense sweep-watchlist      # TTL prune
 # Orchestrator
 tradingagents forge orchestrator status        # queue + recent jobs
 tradingagents forge orchestrator retry <job-id> --note "reason for replay"
+tradingagents forge operator status --full-database-check
+tradingagents forge operator preflight --require-production-config --require-all-services
 python scripts/f4_f5_exit_gate.py --since 2026-06-03T09:00:00Z --window-hours 12
 
 # Durable alert and digest delivery

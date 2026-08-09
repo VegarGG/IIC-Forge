@@ -153,7 +153,11 @@ def drain_one(
             retry_cap_seconds=retry_cap_seconds,
         )
     except queue_store.QueueLeaseLost:
-        log.warning("job %d result was fenced", job["job_id"])
+        log.warning(
+            "job %d result was fenced",
+            job["job_id"],
+            extra={"correlation_id": f"analysis-job:{job['job_id']}"},
+        )
     except Exception as exc:  # noqa: BLE001
         _record_failure(
             conn,
@@ -473,7 +477,11 @@ def run_one_process(
             )
         except queue_store.QueueLeaseLost:
             _terminate_process(process, grace_seconds=terminate_grace)
-            log.warning("job %d lease was lost before child registration", job["job_id"])
+            log.warning(
+                "job %d lease was lost before child registration",
+                job["job_id"],
+                extra={"correlation_id": f"analysis-job:{job['job_id']}"},
+            )
             return True
 
         outcome = _monitor_process(
@@ -497,7 +505,11 @@ def run_one_process(
                     exit_code=outcome.exit_code or 0,
                 )
             except queue_store.QueueLeaseLost:
-                log.warning("job %d child result was fenced", job["job_id"])
+                log.warning(
+                    "job %d child result was fenced",
+                    job["job_id"],
+                    extra={"correlation_id": f"analysis-job:{job['job_id']}"},
+                )
         else:
             _record_failure(
                 conn,

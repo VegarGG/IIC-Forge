@@ -33,6 +33,8 @@ def test_compose_contains_every_critical_runtime_service(compose):
         "delivery-worker",
         "telegram-bot",
         "action-handler",
+        "operator-monitor",
+        "dashboard",
     }
     assert required <= set(compose["services"])
 
@@ -93,7 +95,7 @@ def test_compose_hardens_non_root_application_services(compose):
 def test_compose_mounts_secrets_as_files_not_environment_values(compose):
     common = compose["x-app-common"]
     assert set(common["secrets"]) == set(compose["secrets"]) - {
-        "backup_encryption_key"
+        "backup_encryption_key", "operator_dashboard_password"
     }
     environment = common["environment"]
     assert "DEEPSEEK_API_KEY" not in environment
@@ -130,3 +132,24 @@ def test_compose_enforces_combined_beijing_day_llm_budget(compose):
     assert environment["TRADINGAGENTS_DAILY_BUDGET_USD"] == "20"
     assert environment["TRADINGAGENTS_DAILY_BUDGET_TIMEZONE"] == "Asia/Shanghai"
     assert environment["TRADINGAGENTS_DAILY_BUDGET_RESERVATION_USD"] == "1"
+
+
+@pytest.mark.unit
+def test_dashboard_is_loopback_authenticated_and_secret_isolated(compose):
+    dashboard = compose["services"]["dashboard"]
+    assert dashboard["ports"] == ["127.0.0.1:${IIC_DASHBOARD_PORT:-8501}:8501"]
+    assert dashboard["networks"] == ["operator"]
+    assert compose["networks"]["operator"]["internal"] is True
+    assert dashboard["secrets"] == ["operator_dashboard_password"]
+    assert "env_file" not in dashboard
+    assert "deepseek_api_key" not in dashboard["secrets"]
+    assert "iic-data:/data" in dashboard["volumes"]
+
+
+@pytest.mark.unit
+def test_operator_monitor_has_no_application_or_backup_keys(compose):
+    monitor = compose["services"]["operator-monitor"]
+    assert "secrets" not in monitor
+    assert "env_file" not in monitor
+    assert "${IIC_BACKUP_DIR:-./backups}:/backups:ro" in monitor["volumes"]
+    assert monitor["networks"] == ["backend"]

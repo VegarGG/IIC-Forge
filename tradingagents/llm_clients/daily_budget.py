@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
@@ -49,11 +50,86 @@ def daily_budget_total(
     budget_date: str,
 ) -> float:
     row = conn.execute(
-        f"SELECT COALESCE(SUM({_charged_expression()}), 0.0) "
-        "FROM llm_budget_ledger WHERE budget_date = ?",
+        f"SELECT COALESCE(SUM(MAX(0.0, {_charged_expression()} - "
+        "COALESCE(r.released_usd, 0.0))), 0.0) "
+        "FROM llm_budget_ledger l LEFT JOIN llm_budget_releases r "
+        "ON r.call_id=l.call_id WHERE l.budget_date = ?",
         (budget_date,),
     ).fetchone()
     return float(row[0] or 0.0)
+
+
+def release_stale_reservation(
+    conn: sqlite3.Connection,
+    *,
+    call_id: str,
+    operator_note: str,
+    evidence: str,
+    confirm: str,
+    minimum_age_hours: int = 1,
+    now: datetime | None = None,
+) -> float:
+    """Append an audited release for a provably abandoned reservation.
+
+    The original ledger row is never changed. Settled/charged calls and recent
+    reservations cannot be released, and the primary key prevents a second
+    release from reducing the budget twice.
+    """
+    if confirm != f"RELEASE {call_id}":
+        raise ValueError(f"confirmation must be exactly 'RELEASE {call_id}'")
+    if not operator_note.strip() or not evidence.strip():
+        raise ValueError("operator note and evidence must not be empty")
+    if minimum_age_hours < 1:
+        raise ValueError("minimum reservation age must be at least one hour")
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    with conn:
+        row = conn.execute(
+            "SELECT state, reserved_usd, created_ts FROM llm_budget_ledger "
+            "WHERE call_id=?",
+            (call_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"budget call {call_id!r} does not exist")
+        if row["state"] != "reserved":
+            raise ValueError("only a reserved budget call can be released")
+        if conn.execute(
+            "SELECT 1 FROM llm_budget_releases WHERE call_id=?", (call_id,)
+        ).fetchone() is not None:
+            raise ValueError("budget reservation was already released")
+        created = datetime.fromisoformat(str(row["created_ts"]))
+        if created.tzinfo is None:
+            raise ValueError("reservation timestamp is not timezone-aware")
+        if current - created.astimezone(timezone.utc) < timedelta(
+            hours=minimum_age_hours
+        ):
+            raise ValueError(
+                f"reservation must be at least {minimum_age_hours} hour(s) old"
+            )
+        released = float(row["reserved_usd"])
+        conn.execute(
+            "INSERT INTO llm_budget_releases (call_id, released_usd, released_ts, "
+            "operator_note, evidence) VALUES (?, ?, ?, ?, ?)",
+            (
+                call_id,
+                released,
+                current.isoformat(),
+                operator_note.strip()[:2000],
+                evidence.strip()[:4000],
+            ),
+        )
+        conn.execute(
+            "INSERT INTO operator_actions (action_type, target_type, target_id, "
+            "requested_ts, operator_note, result, metadata) "
+            "VALUES ('release_budget_reservation', 'llm_budget_call', ?, ?, ?, "
+            "'released', ?)",
+            (
+                call_id,
+                current.isoformat(),
+                operator_note.strip()[:2000],
+                json.dumps({"released_usd": released}, sort_keys=True),
+            ),
+        )
+    return released
 
 
 class DailyUsdBudget:

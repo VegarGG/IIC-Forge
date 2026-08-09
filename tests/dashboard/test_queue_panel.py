@@ -26,3 +26,4 @@ def test_fetch_queue_depth_by_state(tmp_path):
 
     jobs = fetch_recent_jobs(conn, limit=10)
     assert len(jobs) == 4
+    assert all("payload" not in job for job in jobs)

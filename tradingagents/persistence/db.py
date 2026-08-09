@@ -77,6 +77,11 @@ _APPLICATION_TABLES: Set[str] = {
     "shadow_eval",
     "ops_counters",
     "llm_budget_ledger",
+    "llm_budget_releases",
+    "service_heartbeats",
+    "operational_alerts",
+    "operator_actions",
+    "recovery_drills",
 }
 
 _EXPECTED_TABLES: Set[str] = _APPLICATION_TABLES | {"schema_migrations"}
