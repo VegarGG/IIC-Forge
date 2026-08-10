@@ -144,7 +144,7 @@ app.add_typer(orch_app, name="orchestrator")
 
 @orch_app.command("promoter")
 def orchestrator_promoter() -> None:
-    """Run the promoter loop in the foreground (systemd wraps this)."""
+    """Run the promoter loop in the foreground (Compose supervises production)."""
     from tradingagents.orchestrator.promoter import main
     from tradingagents.ops.heartbeat import ServiceHeartbeat
     from tradingagents.ops.logging import configure_logging
@@ -160,7 +160,7 @@ def orchestrator_promoter() -> None:
 
 @orch_app.command("worker")
 def orchestrator_worker() -> None:
-    """Run the worker loop in the foreground (systemd wraps this)."""
+    """Run the worker loop in the foreground (Compose supervises production)."""
     from tradingagents.orchestrator.worker import main
     from tradingagents.ops.heartbeat import ServiceHeartbeat
     from tradingagents.ops.logging import configure_logging

@@ -41,10 +41,17 @@ RUN /app/.venv/bin/python -c \
 FROM ${PYTHON_IMAGE} AS runtime
 
 ARG APP_VERSION=0.2.5
+ARG BUILD_DATE=1970-01-01T00:00:00Z
+ARG SCHEMA_VERSION=6
+ARG VCS_REF=unknown
 
 LABEL org.opencontainers.image.title="IIC-Forge" \
       org.opencontainers.image.version="${APP_VERSION}" \
-      org.opencontainers.image.description="Private single-operator investment intelligence"
+      org.opencontainers.image.description="Private single-operator investment intelligence" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.source="https://github.com/VegarGG/IIC-Forge" \
+      io.iic-forge.schema-version="${SCHEMA_VERSION}"
 
 ENV HOME=/home/appuser \
     HF_HOME=/app/model-cache \

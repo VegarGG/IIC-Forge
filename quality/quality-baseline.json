@@ -1,0 +1,1192 @@
+{
+  "commands": {
+    "mypy": "mypy --ignore-missing-imports --follow-imports=skip --show-error-codes tradingagents cli",
+    "ruff": "ruff check . --output-format json"
+  },
+  "findings": {
+    "mypy": [
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible default for argument \"timeout\" (default has type \"None\", argument has type \"float\")",
+        "path": "cli/announcements.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible default for argument \"url\" (default has type \"None\", argument has type \"str\")",
+        "path": "cli/announcements.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible types in assignment (expression has type \"object\", variable has type \"float\")",
+        "path": "cli/announcements.py"
+      },
+      {
+        "code": "arg-type",
+        "count": 1,
+        "message": "Argument 1 to \"build_analyst_execution_plan\" has incompatible type \"list[tuple[str, AnalystType]]\"; expected \"Iterable[str]\"",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "arg-type",
+        "count": 1,
+        "message": "Argument 1 to \"mark_started\" of \"AnalystWallTimeTracker\" has incompatible type \"tuple[str, AnalystType]\"; expected \"str\"",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "list-item",
+        "count": 1,
+        "message": "List item 0 has incompatible type \"str\"; expected \"tuple[str, AnalystType]\"",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "list-item",
+        "count": 1,
+        "message": "List item 1 has incompatible type \"str\"; expected \"tuple[str, AnalystType]\"",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "list-item",
+        "count": 1,
+        "message": "List item 2 has incompatible type \"str\"; expected \"tuple[str, AnalystType]\"",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "list-item",
+        "count": 1,
+        "message": "List item 3 has incompatible type \"str\"; expected \"tuple[str, AnalystType]\"",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "list-item",
+        "count": 1,
+        "message": "List item 4 has incompatible type \"str\"; expected \"tuple[str, AnalystType]\"",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "method-assign",
+        "count": 2,
+        "message": "Cannot assign to a method",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "no-redef",
+        "count": 1,
+        "message": "Name \"get_analysis_date\" already defined (possibly by an import)",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "no-redef",
+        "count": 1,
+        "message": "Name \"get_ticker\" already defined (possibly by an import)",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "assignment",
+        "count": 3,
+        "message": "Incompatible default for argument \"curr_date\" (default has type \"None\", argument has type \"str\")",
+        "path": "tradingagents/agents/utils/fundamental_data_tools.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible default for argument \"config\" (default has type \"None\", argument has type \"dict[Any, Any]\")",
+        "path": "tradingagents/agents/utils/memory.py"
+      },
+      {
+        "code": "var-annotated",
+        "count": 1,
+        "message": "Need type annotation for \"cross\" (hint: \"cross: list[<type>] = ...\")",
+        "path": "tradingagents/agents/utils/memory.py"
+      },
+      {
+        "code": "var-annotated",
+        "count": 1,
+        "message": "Need type annotation for \"same\" (hint: \"same: list[<type>] = ...\")",
+        "path": "tradingagents/agents/utils/memory.py"
+      },
+      {
+        "code": "attr-defined",
+        "count": 4,
+        "message": "\"object\" has no attribute \"get_bars\"",
+        "path": "tradingagents/backtest/harness.py"
+      },
+      {
+        "code": "return-value",
+        "count": 1,
+        "message": "Incompatible return value type (got \"int | None\", expected \"int\")",
+        "path": "tradingagents/backtest/harness.py"
+      },
+      {
+        "code": "var-annotated",
+        "count": 1,
+        "message": "Need type annotation for \"metrics\"",
+        "path": "tradingagents/backtest/harness.py"
+      },
+      {
+        "code": "arg-type",
+        "count": 1,
+        "message": "Argument 1 to \"Path\" has incompatible type \"str | Path | None\"; expected \"str | PathLike[str]\"",
+        "path": "tradingagents/dashboard/auth.py"
+      },
+      {
+        "code": "import-untyped",
+        "count": 1,
+        "message": "Library stubs not installed for \"dateutil.relativedelta\"",
+        "path": "tradingagents/dataflows/akshare.py"
+      },
+      {
+        "code": "assignment",
+        "count": 4,
+        "message": "Incompatible default for argument \"curr_date\" (default has type \"None\", argument has type \"str\")",
+        "path": "tradingagents/dataflows/alpha_vantage_fundamentals.py"
+      },
+      {
+        "code": "return-value",
+        "count": 1,
+        "message": "Incompatible return value type (got \"dict[Any, Any] | str\", expected \"str\")",
+        "path": "tradingagents/dataflows/alpha_vantage_fundamentals.py"
+      },
+      {
+        "code": "import-untyped",
+        "count": 1,
+        "message": "Library stubs not installed for \"dateutil.relativedelta\"",
+        "path": "tradingagents/dataflows/alpha_vantage_indicator.py"
+      },
+      {
+        "code": "union-attr",
+        "count": 1,
+        "message": "Item \"dict[Any, Any]\" of \"dict[Any, Any] | str\" has no attribute \"strip\"",
+        "path": "tradingagents/dataflows/alpha_vantage_indicator.py"
+      },
+      {
+        "code": "arg-type",
+        "count": 1,
+        "message": "Argument 1 to \"_filter_csv_by_date_range\" has incompatible type \"dict[Any, Any] | str\"; expected \"str\"",
+        "path": "tradingagents/dataflows/alpha_vantage_stock.py"
+      },
+      {
+        "code": "arg-type",
+        "count": 1,
+        "message": "Argument 1 to \"deepcopy\" has incompatible type \"dict[Any, Any] | None\"; expected \"dict[Any, Any]\"",
+        "path": "tradingagents/dataflows/config.py"
+      },
+      {
+        "code": "index",
+        "count": 1,
+        "message": "Unsupported target for indexed assignment (\"dict[Any, Any] | None\")",
+        "path": "tradingagents/dataflows/config.py"
+      },
+      {
+        "code": "index",
+        "count": 1,
+        "message": "Value of type \"dict[Any, Any] | None\" is not indexable",
+        "path": "tradingagents/dataflows/config.py"
+      },
+      {
+        "code": "union-attr",
+        "count": 1,
+        "message": "Item \"None\" of \"dict[Any, Any] | None\" has no attribute \"get\"",
+        "path": "tradingagents/dataflows/config.py"
+      },
+      {
+        "code": "import-untyped",
+        "count": 1,
+        "message": "Library stubs not installed for \"dateutil.relativedelta\"",
+        "path": "tradingagents/dataflows/futu.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible default for argument \"method\" (default has type \"None\", argument has type \"str\")",
+        "path": "tradingagents/dataflows/interface.py"
+      },
+      {
+        "code": "attr-defined",
+        "count": 1,
+        "message": "\"object\" has no attribute \"keys\"",
+        "path": "tradingagents/dataflows/interface.py"
+      },
+      {
+        "code": "index",
+        "count": 1,
+        "message": "Value of type \"object\" is not indexable",
+        "path": "tradingagents/dataflows/interface.py"
+      },
+      {
+        "code": "operator",
+        "count": 1,
+        "message": "Unsupported right operand type for in (\"object\")",
+        "path": "tradingagents/dataflows/interface.py"
+      },
+      {
+        "code": "import-untyped",
+        "count": 1,
+        "message": "Library stubs not installed for \"dateutil.relativedelta\"",
+        "path": "tradingagents/dataflows/market_fusion.py"
+      },
+      {
+        "code": "import-untyped",
+        "count": 1,
+        "message": "Library stubs not installed for \"dateutil.relativedelta\"",
+        "path": "tradingagents/dataflows/polygon.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible default for argument \"save_path\" (default has type \"None\", argument has type \"str\")",
+        "path": "tradingagents/dataflows/utils.py"
+      },
+      {
+        "code": "assignment",
+        "count": 4,
+        "message": "Incompatible default for argument \"curr_date\" (default has type \"None\", argument has type \"str\")",
+        "path": "tradingagents/dataflows/y_finance.py"
+      },
+      {
+        "code": "import-untyped",
+        "count": 1,
+        "message": "Library stubs not installed for \"dateutil.relativedelta\"",
+        "path": "tradingagents/dataflows/y_finance.py"
+      },
+      {
+        "code": "import-untyped",
+        "count": 1,
+        "message": "Library stubs not installed for \"dateutil.relativedelta\"",
+        "path": "tradingagents/dataflows/yfinance_news.py"
+      },
+      {
+        "code": "arg-type",
+        "count": 1,
+        "message": "Argument \"alpha_return\" to \"reflect_on_final_decision\" of \"Reflector\" has incompatible type \"float | None\"; expected \"float\"",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible default for argument \"config\" (default has type \"None\", argument has type \"dict[str, Any]\")",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible types in assignment (expression has type \"_GeneratorContextManager[Any]\", variable has type \"None\")",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible types in assignment (expression has type \"dict[Any, Any]\", variable has type \"None\")",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "attr-defined",
+        "count": 1,
+        "message": "\"None\" has no attribute \"__enter__\"",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "var-annotated",
+        "count": 1,
+        "message": "Need type annotation for \"log_states_dict\" (hint: \"log_states_dict: dict[<type>, <type>] = ...\")",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "arg-type",
+        "count": 1,
+        "message": "Argument \"base_url\" to \"probe_local_endpoint\" has incompatible type \"Any | None\"; expected \"str\"",
+        "path": "tradingagents/llm_clients/availability.py"
+      },
+      {
+        "code": "misc",
+        "count": 1,
+        "message": "\"None\" not callable",
+        "path": "tradingagents/llm_clients/availability.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible types in assignment (expression has type \"int\", target has type \"str\")",
+        "path": "tradingagents/llm_clients/google_client.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible types in assignment (expression has type \"bool\", target has type \"str\")",
+        "path": "tradingagents/llm_clients/openai_client.py"
+      },
+      {
+        "code": "assignment",
+        "count": 1,
+        "message": "Incompatible types in assignment (expression has type \"str | None\", target has type \"str\")",
+        "path": "tradingagents/llm_clients/openai_client.py"
+      },
+      {
+        "code": "return-value",
+        "count": 2,
+        "message": "Incompatible return value type (got \"int | None\", expected \"int\")",
+        "path": "tradingagents/persistence/memory.py"
+      }
+    ],
+    "ruff": [
+      {
+        "code": "E402",
+        "count": 1,
+        "message": "Module level import not at top of file",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`cli.models.AnalystType` imported but unused",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`rich.columns.Columns` imported but unused",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`rich.tree.Tree` imported but unused",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`typing.Optional` imported but unused",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F403",
+        "count": 1,
+        "message": "`from cli.utils import *` used; unable to detect undefined names",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`ask_anthropic_effort` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`ask_gemini_thinking_config` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`ask_glm_region` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`ask_minimax_region` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`ask_openai_reasoning_effort` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`ask_output_language` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`ask_qwen_region` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`confirm_ollama_endpoint` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`detect_asset_type` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`ensure_api_key` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`select_analysts` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`select_deep_thinking_agent` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`select_llm_provider` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`select_research_depth` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`select_shallow_thinking_agent` may be undefined, or defined from star imports",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F841",
+        "count": 1,
+        "message": "Local variable `decision` is assigned to but never used",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F841",
+        "count": 1,
+        "message": "Local variable `live` is assigned to but never used",
+        "path": "cli/main.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`pydantic.BaseModel` imported but unused",
+        "path": "cli/models.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`typing.Dict` imported but unused",
+        "path": "cli/models.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`typing.List` imported but unused",
+        "path": "cli/models.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`typing.Optional` imported but unused",
+        "path": "cli/models.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`typing.Union` imported but unused",
+        "path": "cli/stats_handler.py"
+      },
+      {
+        "code": "E702",
+        "count": 1,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "scripts/f3_exit_gate.py"
+      },
+      {
+        "code": "E702",
+        "count": 5,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "scripts/f4_exit_gate.py"
+      },
+      {
+        "code": "E402",
+        "count": 2,
+        "message": "Module level import not at top of file",
+        "path": "scripts/shadow_eval.py"
+      },
+      {
+        "code": "E741",
+        "count": 3,
+        "message": "Ambiguous variable name: `l`",
+        "path": "scripts/shadow_eval.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`os` imported but unused",
+        "path": "scripts/smoke_structured_output.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.dataflows.y_finance.get_YFin_data_online` imported but unused",
+        "path": "test.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.dataflows.y_finance.get_balance_sheet` imported but unused",
+        "path": "test.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.dataflows.y_finance.get_cashflow` imported but unused",
+        "path": "test.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.dataflows.y_finance.get_income_statement` imported but unused",
+        "path": "test.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.dataflows.y_finance.get_insider_transactions` imported but unused",
+        "path": "test.py"
+      },
+      {
+        "code": "F401",
+        "count": 4,
+        "message": "`tradingagents.backtest.prices.Resolution` imported but unused",
+        "path": "tests/backtest/test_harness.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`unittest.mock.MagicMock` imported but unused",
+        "path": "tests/backtest/test_harness.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.backtest.prices.Resolution` imported but unused",
+        "path": "tests/backtest/test_leaderboard.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`unittest.mock.MagicMock` imported but unused",
+        "path": "tests/backtest/test_strict_historical.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`datetime.date` imported but unused",
+        "path": "tests/backtest/test_sweep.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.backtest.prices.Resolution` imported but unused",
+        "path": "tests/backtest/test_sweep.py"
+      },
+      {
+        "code": "F841",
+        "count": 1,
+        "message": "Local variable `future_bt` is assigned to but never used",
+        "path": "tests/backtest/test_sweep.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`datetime.datetime` imported but unused",
+        "path": "tests/backtest/test_yfinance_source.py"
+      },
+      {
+        "code": "E401",
+        "count": 3,
+        "message": "Multiple imports on one line",
+        "path": "tests/cli/test_deepdive_prompts.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`unittest.mock.MagicMock` imported but unused",
+        "path": "tests/cli/test_deepdive_prompts.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`unittest.mock.patch` imported but unused",
+        "path": "tests/cli/test_deepdive_prompts.py"
+      },
+      {
+        "code": "E401",
+        "count": 1,
+        "message": "Multiple imports on one line",
+        "path": "tests/cli/test_forge_action_handler.py"
+      },
+      {
+        "code": "F841",
+        "count": 1,
+        "message": "Local variable `r2` is assigned to but never used",
+        "path": "tests/cli/test_forge_sense.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`json` imported but unused",
+        "path": "tests/cli/test_forge_watchlist.py"
+      },
+      {
+        "code": "F841",
+        "count": 1,
+        "message": "Local variable `g` is assigned to but never used",
+        "path": "tests/graph/test_mandatory_derivatives_reverted.py"
+      },
+      {
+        "code": "E702",
+        "count": 2,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tests/llm_clients/test_availability_shared_conn.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`copy` imported but unused",
+        "path": "tests/llm_clients/test_json_schema_binding.py"
+      },
+      {
+        "code": "F841",
+        "count": 1,
+        "message": "Local variable `original_maybe_bind` is assigned to but never used",
+        "path": "tests/llm_clients/test_json_schema_binding.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`datetime.datetime` imported but unused",
+        "path": "tests/orchestrator/test_cutover_counters.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`datetime.timezone` imported but unused",
+        "path": "tests/orchestrator/test_cutover_counters.py"
+      },
+      {
+        "code": "F841",
+        "count": 1,
+        "message": "Local variable `counter` is assigned to but never used",
+        "path": "tests/orchestrator/test_endpoint_down_alert.py"
+      },
+      {
+        "code": "E702",
+        "count": 2,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tests/orchestrator/test_lease_atomicity.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`json` imported but unused",
+        "path": "tests/orchestrator/test_promoter_light_alert.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`sqlite3` imported but unused",
+        "path": "tests/orchestrator/test_promoter_loop.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`os` imported but unused",
+        "path": "tests/persistence/test_db.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`pathlib.Path` imported but unused",
+        "path": "tests/persistence/test_db.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tempfile` imported but unused",
+        "path": "tests/persistence/test_db.py"
+      },
+      {
+        "code": "E402",
+        "count": 1,
+        "message": "Module level import not at top of file",
+        "path": "tests/persistence/test_f5_schema_and_store.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`sqlite3` imported but unused",
+        "path": "tests/persistence/test_f5_schema_and_store.py"
+      },
+      {
+        "code": "E401",
+        "count": 3,
+        "message": "Multiple imports on one line",
+        "path": "tests/scripts/test_f5_exit_gate.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`json` imported but unused",
+        "path": "tests/scripts/test_f5_exit_gate.py"
+      },
+      {
+        "code": "F841",
+        "count": 1,
+        "message": "Local variable `gate_rows` is assigned to but never used",
+        "path": "tests/scripts/test_shadow_eval.py"
+      },
+      {
+        "code": "F841",
+        "count": 1,
+        "message": "Local variable `rows` is assigned to but never used",
+        "path": "tests/scripts/test_shadow_eval.py"
+      },
+      {
+        "code": "E702",
+        "count": 2,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tests/sensing/test_adapter_gdelt.py"
+      },
+      {
+        "code": "E702",
+        "count": 4,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tests/sensing/test_adapter_macro.py"
+      },
+      {
+        "code": "E702",
+        "count": 4,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tests/sensing/test_adapter_polygon_news.py"
+      },
+      {
+        "code": "E702",
+        "count": 1,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tests/sensing/test_adapter_x.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`pathlib.Path` imported but unused",
+        "path": "tests/sensing/test_exit_gate_evaluator.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.persistence.store.insert_event_ticker` imported but unused",
+        "path": "tests/sensing/test_exit_gate_evaluator.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.sensing.salience.SalienceResult` imported but unused",
+        "path": "tests/sensing/test_salience_schema_parse.py"
+      },
+      {
+        "code": "E702",
+        "count": 2,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tests/sensing/test_seed_tickers.py"
+      },
+      {
+        "code": "E702",
+        "count": 1,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tests/sensing/test_ticker_validator.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`pathlib.Path` imported but unused",
+        "path": "tests/test_api_key_env.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.llm_clients.capabilities.ModelCapabilities` imported but unused",
+        "path": "tests/test_capabilities.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`langgraph.checkpoint.sqlite.SqliteSaver` imported but unused",
+        "path": "tests/test_checkpoint_resume.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`pathlib.Path` imported but unused",
+        "path": "tests/test_checkpoint_resume.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`sqlite3` imported but unused",
+        "path": "tests/test_checkpoint_resume.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`pytest` imported but unused",
+        "path": "tests/test_ollama_base_url.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`os` imported but unused",
+        "path": "tests/test_telegram_osint_impl.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.core_stock_tools.get_stock_data` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.fundamental_data_tools.get_balance_sheet` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.fundamental_data_tools.get_cashflow` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.fundamental_data_tools.get_fundamentals` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.fundamental_data_tools.get_income_statement` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.market_snapshot_tools.get_market_snapshot` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.news_data_tools.get_global_news` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.news_data_tools.get_insider_transactions` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.news_data_tools.get_news` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.technical_indicators_tools.get_indicators` imported but unused",
+        "path": "tradingagents/agents/utils/agent_utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.backtest.prices.PriceSource` imported but unused",
+        "path": "tradingagents/backtest/strict_historical.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.alpha_vantage_fundamentals.get_balance_sheet` imported but unused",
+        "path": "tradingagents/dataflows/alpha_vantage.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.alpha_vantage_fundamentals.get_cashflow` imported but unused",
+        "path": "tradingagents/dataflows/alpha_vantage.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.alpha_vantage_fundamentals.get_fundamentals` imported but unused",
+        "path": "tradingagents/dataflows/alpha_vantage.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.alpha_vantage_fundamentals.get_income_statement` imported but unused",
+        "path": "tradingagents/dataflows/alpha_vantage.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.alpha_vantage_indicator.get_indicator` imported but unused",
+        "path": "tradingagents/dataflows/alpha_vantage.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.alpha_vantage_news.get_global_news` imported but unused",
+        "path": "tradingagents/dataflows/alpha_vantage.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.alpha_vantage_news.get_insider_transactions` imported but unused",
+        "path": "tradingagents/dataflows/alpha_vantage.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.alpha_vantage_news.get_news` imported but unused",
+        "path": "tradingagents/dataflows/alpha_vantage.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.alpha_vantage_stock.get_stock` imported but unused",
+        "path": "tradingagents/dataflows/alpha_vantage.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`typing.Annotated` imported but unused",
+        "path": "tradingagents/dataflows/interface.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`datetime.datetime` imported but unused",
+        "path": "tradingagents/dataflows/stocktwits.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`datetime.timezone` imported but unused",
+        "path": "tradingagents/dataflows/stocktwits.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`typing.Optional` imported but unused",
+        "path": "tradingagents/dataflows/stocktwits.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`json` imported but unused",
+        "path": "tradingagents/dataflows/utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`os` imported but unused",
+        "path": "tradingagents/dataflows/utils.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.stockstats_utils._clean_dataframe` imported but unused",
+        "path": "tradingagents/dataflows/y_finance.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`os` imported but unused",
+        "path": "tradingagents/dataflows/y_finance.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.agent_states.AgentState` imported but unused",
+        "path": "tradingagents/graph/propagation.py"
+      },
+      {
+        "code": "F403",
+        "count": 1,
+        "message": "`from tradingagents.agents import *` used; unable to detect undefined names",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_aggressive_debator` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_bear_researcher` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_bull_researcher` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_conservative_debator` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_derivative_analyst` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_fundamentals_analyst` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_market_analyst` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_msg_delete` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_neutral_debator` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_news_analyst` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_portfolio_manager` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_research_manager` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_sentiment_analyst` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "F405",
+        "count": 1,
+        "message": "`create_trader` may be undefined, or defined from star imports",
+        "path": "tradingagents/graph/setup.py"
+      },
+      {
+        "code": "E402",
+        "count": 18,
+        "message": "Module level import not at top of file",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.agent_states.AgentState` imported but unused",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.agent_states.InvestDebateState` imported but unused",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`tradingagents.agents.utils.agent_states.RiskDebateState` imported but unused",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "F403",
+        "count": 1,
+        "message": "`from tradingagents.agents import *` used; unable to detect undefined names",
+        "path": "tradingagents/graph/trading_graph.py"
+      },
+      {
+        "code": "F401",
+        "count": 1,
+        "message": "`.validators.validate_model` imported but unused",
+        "path": "tradingagents/llm_clients/azure_client.py"
+      },
+      {
+        "code": "F811",
+        "count": 1,
+        "message": "Redefinition of unused `validate_model` from line 7",
+        "path": "tradingagents/llm_clients/azure_client.py"
+      },
+      {
+        "code": "E702",
+        "count": 4,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tradingagents/sensing/adapters/gdelt.py"
+      },
+      {
+        "code": "E702",
+        "count": 5,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tradingagents/sensing/adapters/macro.py"
+      },
+      {
+        "code": "E702",
+        "count": 5,
+        "message": "Multiple statements on one line (semicolon)",
+        "path": "tradingagents/sensing/adapters/x.py"
+      }
+    ]
+  },
+  "policy": "No fingerprint may be added or increase; reductions are allowed.",
+  "schema_version": 1,
+  "tools": {
+    "mypy": "mypy 1.11.2 (compiled: yes)",
+    "ruff": "ruff 0.6.9"
+  },
+  "totals": {
+    "mypy": 67,
+    "ruff": 193
+  }
+}

@@ -59,7 +59,7 @@ jobs:
         run: .venv/bin/python -m pytest -q
 
       - name: Build wheel and source distribution
-        run: .venv/bin/python -m build
+        run: .venv/bin/python scripts/verify_reproducible_artifacts.py --output-dir dist
 
       - name: Verify distribution resources
         run: .venv/bin/python scripts/verify_distribution.py dist/*
@@ -76,17 +76,138 @@ jobs:
             "$GITHUB_WORKSPACE/scripts/installed_package_smoke.py" \
             --forbid-root "$GITHUB_WORKSPACE"
 
+      - name: Publish reproducible Python artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  quality:
+    name: Blocking quality ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install pinned quality analyzers
+        run: python -m pip install ruff==0.6.9 mypy==1.11.2
+
+      - name: Reject new Ruff or mypy debt
+        run: python scripts/quality_ratchet.py check
+
+  security:
+    name: Dependencies, secrets, and Python SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependency manager and audit tool
+        run: |
+          python -m pip install "uv==0.11.19"
+          python -m venv .security-tools
+          .security-tools/bin/python -m pip install "pip-audit==2.10.1"
+
+      - name: Sync exact production dependency set
+        run: >-
+          python -m uv sync
+          --frozen
+          --no-dev
+          --extra production
+          --no-install-project
+          --no-editable
+
+      - name: Export and audit the frozen production dependency graph
+        run: |
+          install -d evidence
+          python -m uv export \
+            --frozen \
+            --no-dev \
+            --extra production \
+            --no-emit-project \
+            --no-hashes \
+            --output-file evidence/requirements-production.txt
+          site_packages="$(.venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          .security-tools/bin/pip-audit \
+            --path "$site_packages" \
+            --strict \
+            --desc off \
+            --format json \
+            --output evidence/pip-audit.json
+
+      - name: Generate deterministic installed-environment SBOM
+        run: >-
+          .venv/bin/python -m tradingagents.ops.sbom
+          --application-version 0.2.5
+          --lockfile uv.lock
+          --output evidence/python-environment.cdx.json
+
+      - name: Scan repository for secrets and configuration defects
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          exit-code: "1"
+          format: json
+          output: evidence/trivy-filesystem.json
+
+      - name: Publish dependency and SBOM evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-security-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
+
   image-build:
-    name: Production image build
-    needs: test
+    name: Production image, Compose, scan, and manifest
+    needs: [test, quality, security]
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download reproducible Python artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+
+      - name: Download Python security evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: python-security-evidence
+          path: evidence
+
       - name: Build production image from frozen lock
-        run: docker build --tag iic-forge:ci .
+        run: |
+          commit_date="$(git show -s --format=%cI HEAD)"
+          docker build \
+            --build-arg "APP_VERSION=0.2.5" \
+            --build-arg "BUILD_DATE=$commit_date" \
+            --build-arg "SCHEMA_VERSION=6" \
+            --build-arg "VCS_REF=$GITHUB_SHA" \
+            --tag iic-forge:ci .
 
       - name: Smoke-test production image
         run: |
@@ -121,6 +242,48 @@ jobs:
           docker compose run --rm --no-deps volume-init
           docker compose run --rm --no-deps database-init
 
+      - name: Generate complete image SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          image-ref: iic-forge:ci
+          format: cyclonedx
+          output: evidence/image.cdx.json
+          scanners: vuln
+
+      - name: Reject high and critical image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          image-ref: iic-forge:ci
+          format: json
+          output: evidence/trivy-image.json
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+
+      - name: Generate content-addressed release manifest
+        run: |
+          image_id="$(docker image inspect --format '{{.Id}}' iic-forge:ci)"
+          artifact_args=()
+          while IFS= read -r artifact; do
+            artifact_args+=(--artifact "$artifact")
+          done < <(find dist evidence -maxdepth 1 -type f -print | sort)
+          python scripts/release_manifest.py \
+            "${artifact_args[@]}" \
+            --image-id "$image_id" \
+            --output evidence/release-manifest.json
+
+      - name: Publish release-candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Remove Compose smoke volumes
         if: always()
         env:
@@ -128,32 +291,3 @@ jobs:
           IIC_IMAGE: iic-forge:ci
           IIC_SECRETS_DIR: /tmp/iic-forge-ci-secrets
         run: docker compose down --volumes --remove-orphans
-
-  quality-baseline:
-    name: Non-blocking quality baseline
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install quality tools
-        run: python -m pip install ruff==0.6.9 mypy==1.11.2
-
-      - name: Ruff baseline
-        continue-on-error: true
-        run: ruff check .
-
-      - name: Mypy baseline
-        continue-on-error: true
-        run: >-
-          mypy
-          --ignore-missing-imports
-          --follow-imports=skip
-          tradingagents
-          cli

@@ -6,6 +6,9 @@ x-app-common: &app-common
     context: .
     args:
       APP_VERSION: "0.2.5"
+      BUILD_DATE: ${IIC_BUILD_DATE:-1970-01-01T00:00:00Z}
+      SCHEMA_VERSION: "6"
+      VCS_REF: ${IIC_VCS_REF:-unknown}
   env_file:
     - ${IIC_ENV_FILE:-.env.production}
   environment:
@@ -79,6 +82,9 @@ x-backup-common: &backup-common
     context: .
     args:
       APP_VERSION: "0.2.5"
+      BUILD_DATE: ${IIC_BUILD_DATE:-1970-01-01T00:00:00Z}
+      SCHEMA_VERSION: "6"
+      VCS_REF: ${IIC_VCS_REF:-unknown}
   profiles: [operations]
   user: "0:0"
   read_only: true
@@ -95,7 +101,7 @@ x-backup-common: &backup-common
 
 services:
   redis:
-    image: ${IIC_REDIS_IMAGE:-redis:7.4.7-alpine3.21}
+    image: ${IIC_REDIS_IMAGE:-redis:7.4.9-alpine3.21@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99}
     command:
       - redis-server
       - /etc/redis/redis.conf
@@ -137,6 +143,9 @@ services:
       context: .
       args:
         APP_VERSION: "0.2.5"
+        BUILD_DATE: ${IIC_BUILD_DATE:-1970-01-01T00:00:00Z}
+        SCHEMA_VERSION: "6"
+        VCS_REF: ${IIC_VCS_REF:-unknown}
     user: "0:0"
     entrypoint: [/usr/bin/chown]
     command: [-R, "1000:1000", /data]
@@ -261,6 +270,9 @@ services:
       context: .
       args:
         APP_VERSION: "0.2.5"
+        BUILD_DATE: ${IIC_BUILD_DATE:-1970-01-01T00:00:00Z}
+        SCHEMA_VERSION: "6"
+        VCS_REF: ${IIC_VCS_REF:-unknown}
     command: [forge, operator, monitor]
     environment:
       HOME: /home/appuser
@@ -309,6 +321,9 @@ services:
       context: .
       args:
         APP_VERSION: "0.2.5"
+        BUILD_DATE: ${IIC_BUILD_DATE:-1970-01-01T00:00:00Z}
+        SCHEMA_VERSION: "6"
+        VCS_REF: ${IIC_VCS_REF:-unknown}
     command:
       - streamlit
       - run

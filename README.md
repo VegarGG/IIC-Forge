@@ -166,11 +166,16 @@ docker compose ps
 ```
 
 See
+[`ops/runbooks/production-readiness-batch-10.md`](ops/runbooks/production-readiness-batch-10.md)
+for the blocking release-candidate gates, disposable fault drill, digest-bound
+release evidence, 72-hour soak, and final go/no-go checklists. A deployment is
+not production-approved until those field gates pass for the exact candidate
+commit and image digest. See
 [`ops/runbooks/production-readiness-batch-9.md`](ops/runbooks/production-readiness-batch-9.md)
 for operator status, preflight, durable operational alerts, recovery controls,
-retention, and dashboard field gates. The
-[`ops/runbooks/production-readiness-batch-8.md`](ops/runbooks/production-readiness-batch-8.md)
-for encrypted local backup, hourly RPO, and restore gates. The
+retention, and dashboard field gates. See the
+[`Batch 8 runbook`](ops/runbooks/production-readiness-batch-8.md) for encrypted
+local backup, hourly RPO, and restore gates. The
 [`Batch 7 runbook`](ops/runbooks/production-readiness-batch-7.md) covers data
 trust and the combined budget, while the
 [`Batch 6 Compose runbook`](ops/runbooks/production-readiness-batch-6.md)
@@ -258,7 +263,7 @@ Notable tunables in `default_config.py`:
 | `queue_lease_margin_seconds` | `300` | fence margin beyond the hard process timeout |
 | `market_data_stale_after_seconds` | `900` | snapshot freshness TTL for same-day market data |
 | `market_data_cache_ttl_seconds` | `900` | same-day OHLCV cache TTL; historical cache files are reused |
-| cost / rate guards | `enabled=False` | coded but off through F0–F5 (measure first) |
+| library cost/rate defaults | `enabled=False` | development-safe default; canonical production Compose overrides the combined paid-LLM budget to USD20 per Beijing day |
 
 Alert delivery is a durable SQLite outbox. Inspect and operate it with
 `iic-forge forge delivery status|inspect|retry|requeue|cancel`; every manual
@@ -335,8 +340,9 @@ docker compose logs --since 10m triage promoter analysis-worker delivery-worker
   comparison or disagreement analysis.
 - **Disagreement is signal** — synthesis renders Consensus / Divergence /
   Recommendation; the divergence section is never averaged away.
-- **Cost guards ship disabled** — rate/budget guards are coded but
-  `enabled=False` through F0–F5: measure first, enforce later.
+- **Production has a hard combined paid-LLM budget** — library defaults remain
+  disabled for development compatibility, while canonical Compose enables a
+  USD20 limit that resets on the Beijing calendar day.
 - **Everything is resumable** — sensing cursors, fenced orchestrator leases,
   and idempotent writes let any unit restart without losing queued work; each
   analysis attempt runs in a child process that is hard-terminated on timeout
